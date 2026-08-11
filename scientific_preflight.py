@@ -125,8 +125,11 @@ def run_scientific_preflight(output_path, seeds=PREFLIGHT_SEEDS,
         )
     }
     passed = all(math.isclose(value, 1.0) for value in fractions.values())
+    from source_integrity import source_tree_digest
+
     report = {
         "schema_version": 1,
+        "source_tree_digest": source_tree_digest(),
         "method": "bounded dynamic feasibility preflight; no training",
         "parameter_profile": active_profile_metadata(),
         "seeds": list(seeds),

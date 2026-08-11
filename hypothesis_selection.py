@@ -13,7 +13,10 @@ from physical_hypotheses import POWER_HYPOTHESES
 SELECTION_SCHEMA_VERSION = 1
 CALIBRATION_FIGURE = 6
 CALIBRATION_METHODS = ("AO-pCSI", "AO-iCSI")
-MAX_NORMALIZED_CURVE_ERROR = 0.15
+# A candidate must fit within three declared digitization-uncertainty units.
+# Scaling by the 7-9 bit/s/Hz curve magnitude previously admitted errors above
+# one bit/s/Hz despite a declared 0.08 bit/s/Hz extraction uncertainty.
+MAX_NORMALIZED_CURVE_ERROR = 3.0
 MIN_POWER_RESPONSE_RATIO = 0.50
 
 
@@ -98,8 +101,7 @@ def score_power_hypothesis(candidate: dict, reference_source) -> dict:
         power_response_ratios.append(
             float((generated[-1] - generated[0]) / observed_response)
         )
-        curve_scale = np.maximum(np.abs(observed), uncertainty)
-        curve_residuals.extend(((generated - observed) / curve_scale).tolist())
+        curve_residuals.extend(((generated - observed) / uncertainty).tolist())
         observed_slope = np.diff(observed)
         generated_slope = np.diff(generated)
         slope_scale = np.maximum(np.abs(observed_slope), uncertainty)
@@ -174,7 +176,8 @@ def select_power_hypothesis(candidates, reference_source) -> dict:
         "selection_rule": (
             "fully feasible; zero pCSI/iCSI ordering and material power-"
             "direction violations; at least 50% of the reference power "
-            "response; normalized curve error <= 0.15; then normalized curve "
+            "response; curve RMSE <= 3 digitization-uncertainty units; then "
+            "normalized curve "
             "and slope error"
         ),
         "admissibility_thresholds": {

@@ -88,19 +88,19 @@ def test_paper_objective_and_sensing_constraint_match_eq16():
     assert np.isclose(penalty, 0.4)
 
 
-def test_passive_cascade_power_uses_sum_of_element_powers_from_eq16c():
+def test_passive_cascade_power_uses_coherent_element_sum_from_eq16c():
     from paper_contract import cascade_power_16c
 
     class CancellationFixture:
         # The two element contributions are +1 and -1.  A coherent sum has
-        # zero power, while printed Eq. (16c) sums their individual powers.
+        # zero power under the norm-of-sum expression printed in Eq. (16c).
         H_ru_hat = [np.array([[1.0, 1.0]], dtype=complex)]
         G_brj_hat = np.array([[1.0], [1.0]], dtype=complex)
 
     power = cascade_power_16c(
         CancellationFixture(), np.array([1.0, -1.0], dtype=complex)
     )
-    assert np.isclose(power, 2.0)
+    assert np.isclose(power, 0.0)
 
 
 def test_mobile_targets_are_seeded_bounded_and_reset_to_their_initial_scene():

@@ -195,6 +195,10 @@ class EnvironmentFeasibleProjectionTests(unittest.TestCase):
             env,
             "_build_state",
             return_value=np.zeros(env.state_dim, dtype=np.float32),
+        ), patch.object(
+            cfg,
+            "channel_coherence_hypothesis_id",
+            "episode_block_fading",
         ):
             env.step(np.zeros(env.action_dim))
 
@@ -275,10 +279,10 @@ class EnvironmentFeasibleProjectionTests(unittest.TestCase):
             "deterministic_projection_search_exhausted",
         )
 
-    def test_training_replay_uses_executed_not_proposed_action(self):
+    def test_training_replay_uses_actor_command_not_projected_action(self):
         for function in (simulation.train_ddpg, simulation.train_dtl):
             source = inspect.getsource(function)
-            self.assertIn('info["executed_action"]', source)
+            self.assertIn('info["proposed_action"]', source)
 
 
 if __name__ == "__main__":

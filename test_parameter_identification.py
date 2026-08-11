@@ -162,25 +162,34 @@ def test_full_run_profile_requires_matching_success_authority():
         )
 
     with tempfile.TemporaryDirectory() as directory_name:
+        from source_integrity import source_tree_digest
+
         directory = Path(directory_name)
-        profile = profile_from_mapping(_example_profile())
+        source_digest = source_tree_digest()
+        profile_payload = _example_profile()
+        profile_payload["selection"]["source_tree_digest"] = source_digest
+        profile = profile_from_mapping(profile_payload)
         profile_path = write_profile(
             profile, directory / "identified_profile.json"
         )
         write_json(directory / "parameter_search.json", {
             "selected_profile_digest": profile.digest,
+            "source_tree_digest": source_digest,
         })
         (directory / "parameter_search.npz").write_bytes(b"fixture")
         write_json(directory / "holdout_validation.json", {
             "accepted": True,
+            "source_tree_digest": source_digest,
         })
         write_json(directory / "stress_validation.json", {
             "accepted": True,
             "profile_digest": profile.digest,
+            "source_tree_digest": source_digest,
         })
         write_json(directory / "scientific_preflight.json", {
             "passed": True,
             "parameter_profile": {"digest": profile.digest},
+            "source_tree_digest": source_digest,
         })
         write_json(directory / "reproduction_selection.json", {
             "selected_profile": "identified_profile.json",
@@ -194,6 +203,7 @@ def test_full_run_profile_requires_matching_success_authority():
             "ready_for_full_run": True,
             "paper_curve_ordinates_used": False,
             "communication_rate_magnitude_used_in_selection": False,
+            "source_tree_digest": source_digest,
         })
         status_path = directory / "preparation_status.json"
         write_json(status_path, {
@@ -201,6 +211,7 @@ def test_full_run_profile_requires_matching_success_authority():
             "ready_for_full_run": True,
             "selected_profile_digest": profile.digest,
             "authority": "reproduction_selection.json",
+            "source_tree_digest": source_digest,
         })
 
         loaded = load_prepared_profile(profile_path)
@@ -211,6 +222,7 @@ def test_full_run_profile_requires_matching_success_authority():
             "ready_for_full_run": False,
             "selected_profile_digest": profile.digest,
             "authority": "reproduction_selection.json",
+            "source_tree_digest": source_digest,
         })
         try:
             load_prepared_profile(profile_path)

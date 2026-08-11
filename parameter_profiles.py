@@ -9,6 +9,10 @@ from types import MappingProxyType
 from typing import Any, Mapping, Optional
 
 from config import cfg
+from paper_contract import (
+    CALIBRATION_SOLVER_SCOPE,
+    FIGURE_6_SYSTEM_CONFIGURATION,
+)
 from physical_hypotheses import get_power_hypothesis
 from ambiguity_hypotheses import (
     get_cross_function_interference_hypothesis,
@@ -198,6 +202,19 @@ def _load_json_object(path, label):
     return payload
 
 
+def _current_source_tree_digest():
+    from source_integrity import source_tree_digest
+    return source_tree_digest()
+
+
+def _require_source_tree_binding(label, payload, expected_digest):
+    actual = payload.get("source_tree_digest")
+    if actual != expected_digest:
+        raise ValueError(
+            f"{label} was produced by a different executable source tree"
+        )
+
+
 def _resolve_sibling_artifact(directory, value, label):
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"Selection authority has no {label} path")
@@ -217,12 +234,22 @@ def load_prepared_profile(path):
     profile = load_profile(profile_path)
     if profile.kind != "identified":
         raise ValueError("A full run requires an identified parameter profile")
+    current_source_digest = _current_source_tree_digest()
+    _require_source_tree_binding(
+        "Prepared profile", profile.selection, current_source_digest
+    )
 
     directory = profile_path.parent
     status_path = directory / "preparation_status.json"
     authority_path = directory / "reproduction_selection.json"
     status = _load_json_object(status_path, "preparation status")
     authority = _load_json_object(authority_path, "selection authority")
+    _require_source_tree_binding(
+        "Preparation status", status, current_source_digest
+    )
+    _require_source_tree_binding(
+        "Selection authority", authority, current_source_digest
+    )
 
     if status.get("status") != "passed" or not status.get(
         "ready_for_full_run", False
@@ -278,6 +305,13 @@ def load_prepared_profile(path):
     preflight = _load_json_object(
         artifact_paths["scientific_preflight"], "scientific preflight"
     )
+    for label, artifact in (
+        ("Parameter search", search),
+        ("Holdout validation", holdout),
+        ("Stress validation", stress),
+        ("Scientific preflight", preflight),
+    ):
+        _require_source_tree_binding(label, artifact, current_source_digest)
     if search.get("selected_profile_digest") != profile.digest:
         raise ValueError("Parameter-search digest does not match the profile")
     if not holdout.get("accepted", False):
@@ -300,12 +334,20 @@ def load_calibrated_profile(path):
     profile = load_profile(profile_path)
     if profile.kind != "identified":
         raise ValueError("A full run requires an identified calibrated profile")
+    current_source_digest = _current_source_tree_digest()
+    _require_source_tree_binding(
+        "Calibrated profile", profile.selection, current_source_digest
+    )
 
     expected_protocol = "bounded AO calibration on paper Fig. 6 AO curves"
     expected_targets = {"6": ["AO-pCSI", "AO-iCSI"]}
     selection = profile.selection
     if selection.get("protocol") != expected_protocol:
         raise ValueError("Profile is not authorized by the current calibration protocol")
+    if selection.get("calibration_solver_scope") != CALIBRATION_SOLVER_SCOPE:
+        raise ValueError("Profile does not disclose the calibration solver scope")
+    if selection.get("calibration_system") != FIGURE_6_SYSTEM_CONFIGURATION:
+        raise ValueError("Profile calibration system does not match Figure 6")
     if selection.get("calibration_targets") != expected_targets:
         raise ValueError("Profile calibration targets do not match the AO contract")
     if selection.get("holdout_figures_used") != []:
@@ -355,6 +397,9 @@ def load_calibrated_profile(path):
     if lock_path is None:
         raise ValueError("Missing immutable power-hypothesis lock")
     lock = _load_json_object(lock_path, "power-hypothesis lock")
+    _require_source_tree_binding(
+        "Power-hypothesis lock", lock, current_source_digest
+    )
     if (
         lock.get("schema_version") != 1
         or lock.get("kind") != "power_hypothesis_selection_lock"
@@ -365,6 +410,11 @@ def load_calibrated_profile(path):
         raise ValueError("Invalid power-hypothesis lock")
     if lock.get("selected_hypothesis_id") != hypothesis_id:
         raise ValueError("Power-hypothesis lock selected a different model")
+    if (
+        lock.get("calibration_solver_scope") != CALIBRATION_SOLVER_SCOPE
+        or lock.get("calibration_system") != FIGURE_6_SYSTEM_CONFIGURATION
+    ):
+        raise ValueError("Power-hypothesis lock has the wrong calibration system")
     if lock.get("paper_reference_sha256") != reference_digest:
         raise ValueError("Power-hypothesis lock used a different paper reference")
     selected_profile = lock.get("selected_profile")
@@ -395,10 +445,18 @@ def load_calibrated_profile(path):
         "calibration report",
     )
     report = _load_json_object(report_path, "calibration report")
+    _require_source_tree_binding(
+        "Calibration report", report, current_source_digest
+    )
     if report.get("schema_version") != 1:
         raise ValueError("Unsupported calibration report schema")
     if report.get("method") != "bounded_scipy_powell":
         raise ValueError("Unexpected calibration report method")
+    if (
+        report.get("calibration_solver_scope") != CALIBRATION_SOLVER_SCOPE
+        or report.get("calibration_system") != FIGURE_6_SYSTEM_CONFIGURATION
+    ):
+        raise ValueError("Calibration report has the wrong Figure 6 system")
     if report.get("power_hypothesis_id") != hypothesis_id:
         raise ValueError("Calibration report uses a different power hypothesis")
     if report.get("calibration_noise_hypothesis_id") != calibration_noise_id:

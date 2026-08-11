@@ -5,7 +5,7 @@ Reproduces Figs. 4-14 from:
   Saikia et al., "Hybrid-RIS Empowered UAV-Assisted ISAC Systems:
   Transfer Learning-Based DRL," IEEE Trans. Commun., 2025.
 """
-from config import cfg, _factor_upa
+from config import cfg, temporary_system_configuration
 from physical_hypotheses import apply_power_hypothesis
 import numpy as np
 import matplotlib
@@ -34,6 +34,7 @@ from checkpointing import (
 from source_integrity import source_model_digest, source_tree_digest
 from ao_optimizer import run_ao
 from paper_contract import (
+    FIGURE_6_SYSTEM_CONFIGURATION,
     active_power_penalty,
     cascade_penalty_16c,
 )
@@ -231,6 +232,13 @@ def _training_identity(env, tag, algorithm, requested_episodes,
                 "capon" if env.use_capon else "matched_filter",
             ),
             "csi_observation_fraction": env.csi_observation_fraction,
+            "observe_instantaneous_csi": getattr(
+                env,
+                "observe_instantaneous_csi",
+                bool(float(
+                    cfg.rho_nmse if env.sigma2 is None else env.sigma2
+                ) <= 0.0),
+            ),
             "allocation_mode": env.allocation_mode,
         }),
         "parameter_profile_digest": active_profile_metadata()["digest"],
@@ -266,30 +274,22 @@ def _training_identity(env, tag, algorithm, requested_episodes,
 
 @contextmanager
 def _temporary_hris_configuration(L=None, La=None):
-    saved = (cfg.L, cfg.La, cfg.Lp, cfg.Lax, cfg.Lay, cfg.Lpx, cfg.Lpy)
+    overrides = {}
     if L is not None:
-        cfg.L = int(L)
-        cfg.La = int(cfg.L // 2 if La is None else La)
-        cfg.Lp = cfg.L - cfg.La
-        cfg.Lax, cfg.Lay = _factor_upa(cfg.La) if cfg.La else (1, 1)
-        cfg.Lpx, cfg.Lpy = _factor_upa(cfg.Lp) if cfg.Lp else (1, 1)
-    try:
+        overrides = {"L": int(L), "La": int(L // 2 if La is None else La)}
+    with temporary_system_configuration(**overrides):
         yield
-    finally:
-        (cfg.L, cfg.La, cfg.Lp, cfg.Lax, cfg.Lay,
-         cfg.Lpx, cfg.Lpy) = saved
 
 
 @contextmanager
 def _temporary_system_configuration(M=None, L=None, La=None):
-    saved_m = cfg.M
-    try:
-        if M is not None:
-            cfg.M = int(M)
-        with _temporary_hris_configuration(L=L, La=La):
-            yield
-    finally:
-        cfg.M = saved_m
+    overrides = {}
+    if M is not None:
+        overrides["M"] = int(M)
+    if L is not None:
+        overrides.update({"L": int(L), "La": int(L // 2 if La is None else La)})
+    with temporary_system_configuration(**overrides):
+        yield
 
 
 def train_experiment_bundle(n_episodes,
@@ -314,13 +314,13 @@ def train_experiment_bundle(n_episodes,
         raise ValueError("Source and target tasks must use different scene seeds.")
 
     variant_settings = {
-        "perfect": (0.0, True, 1.0),
-        "imperfect": (cfg.rho_nmse, True, 1.0),
-        "partial": (cfg.rho_nmse, True, cfg.partial_csi_fraction),
+        "perfect": (0.0, True, 1.0, True),
+        "imperfect": (cfg.rho_nmse, True, 1.0, False),
+        "partial": (cfg.rho_nmse, True, cfg.partial_csi_fraction, True),
     }
     if variant_sigmas:
         variant_settings.update({
-            name: (float(sigma2), True, 1.0)
+            name: (float(sigma2), True, 1.0, float(sigma2) <= 0.0)
             for name, sigma2 in variant_sigmas.items()
         })
     unknown = set(variants) - set(variant_settings)
@@ -378,7 +378,8 @@ def train_experiment_bundle(n_episodes,
 
         dtl_runs = {}
         for name in variants:
-            sigma2, use_capon, observation_fraction = variant_settings[name]
+            (sigma2, use_capon, observation_fraction,
+             observe_instantaneous_csi) = variant_settings[name]
             target_env = HRISUAVISACEnv(
                 sigma2_scee=sigma2,
                 seed=cfg.target_scene_seed,
@@ -386,6 +387,7 @@ def train_experiment_bundle(n_episodes,
                 sensing_rate_min=sensing_rate_min,
                 sensing_only_sinr_min=sensing_only_sinr_min,
                 csi_observation_fraction=observation_fraction,
+                observe_instantaneous_csi=observe_instantaneous_csi,
             )
             dtl_runs[name] = train_dtl(
                 source["agent"], target_env, int(n_episodes),
@@ -567,6 +569,7 @@ def _random_phase_rate(sigma2=None, n_eval=5, seed_base=100, n_steps=None,
 def _eval_agent(agent, sigma2, n_eval=5, seed_base=100,
                 sensing_rate_min=None, sensing_only_sinr_min=0.0,
                 csi_observation_fraction=1.0,
+                observe_instantaneous_csi=None,
                 strict_feasibility=True, feasibility_evidence=None):
     """Run an agent greedily and return its computed communication rate."""
     return _eval_agent_metrics(
@@ -574,6 +577,7 @@ def _eval_agent(agent, sigma2, n_eval=5, seed_base=100,
         sensing_rate_min=sensing_rate_min,
         sensing_only_sinr_min=sensing_only_sinr_min,
         csi_observation_fraction=csi_observation_fraction,
+        observe_instantaneous_csi=observe_instantaneous_csi,
         strict_feasibility=strict_feasibility,
         feasibility_evidence=feasibility_evidence,
     )["comm_rate"]
@@ -583,6 +587,7 @@ def _eval_agent_metrics(agent, sigma2, n_eval=5, seed_base=100,
                         sensing_rate_min=None,
                         sensing_only_sinr_min=0.0,
                         csi_observation_fraction=1.0,
+                        observe_instantaneous_csi=None,
                         strict_feasibility=True,
                         feasibility_evidence=None):
     """Return measured communication and sensing rates from agent rollouts."""
@@ -594,6 +599,7 @@ def _eval_agent_metrics(agent, sigma2, n_eval=5, seed_base=100,
             sensing_rate_min=sensing_rate_min,
             sensing_only_sinr_min=sensing_only_sinr_min,
             csi_observation_fraction=csi_observation_fraction,
+            observe_instantaneous_csi=observe_instantaneous_csi,
         )
         s = env.reset()
         ep_comm = 0.0
@@ -713,7 +719,7 @@ def train_ddpg(env: HRISUAVISACEnv,
             agent.noise_std = max(0.05, cfg.noise_std * (cfg.noise_decay ** ep))
             next_state, reward, done, info = env.step(action)
             agent.replay.push(
-                state, info["executed_action"], reward, next_state, done
+                state, info["proposed_action"], reward, next_state, done
             )
             agent.update()
             state = next_state
@@ -809,7 +815,7 @@ def train_dtl(source_agent: DDPGAgent,
             agent.noise_std = max(0.05, cfg.noise_std * (cfg.noise_decay ** ep))
             next_state, reward, done, info = env.step(action)
             agent.replay.push(
-                state, info["executed_action"], reward, next_state, done
+                state, info["proposed_action"], reward, next_state, done
             )
             agent.update()
             state = next_state
@@ -1018,7 +1024,7 @@ def fig6_rate_vs_power(training_registry=None, n_ep=None, n_eval=4,
     feasibility = FeasibilityEvidence()
 
     def sweep_pt(PT_dB, sigma2, use_ao=False):
-        with _temporary_system_configuration(M=4, L=20, La=10):
+        with temporary_system_configuration(**FIGURE_6_SYSTEM_CONFIGURATION):
             with _temporary_paper_power_label(PT_dB):
                 rates = []
                 for mc_index in range(n_mc):
@@ -1060,7 +1066,7 @@ def fig6_rate_vs_power(training_registry=None, n_ep=None, n_eval=4,
     baseline_bundle = None
     baseline_power_label = cfg.PT_dB
     for PT_dB in PT_dB_range:
-        with _temporary_system_configuration(M=4, L=20, La=10):
+        with temporary_system_configuration(**FIGURE_6_SYSTEM_CONFIGURATION):
             with _temporary_paper_power_label(PT_dB):
                 bundle6 = registry.get_or_train(
                     n_episodes=train_ep,
@@ -1086,6 +1092,7 @@ def fig6_rate_vs_power(training_registry=None, n_ep=None, n_eval=4,
                     bundle6["dtl"]["partial"]["agent"], cfg.rho_nmse,
                     n_eval=n_eval, seed_base=int(evaluation_seed_base),
                     csi_observation_fraction=cfg.partial_csi_fraction,
+                    observe_instantaneous_csi=True,
                     feasibility_evidence=feasibility,
                 ))
                 ddpg_r.append(_eval_agent(
@@ -1190,6 +1197,7 @@ def fig7_rate_vs_L(training_registry=None, n_ep=None, n_eval=5,
                 hris_bundle["dtl"]["partial"]["agent"], cfg.rho_nmse,
                 n_eval=n_eval, seed_base=int(evaluation_seed_base),
                 csi_observation_fraction=cfg.partial_csi_fraction,
+                observe_instantaneous_csi=True,
                 feasibility_evidence=feasibility,
             ))
             curves["Random Phase"].append(_random_phase_rate(
@@ -1679,7 +1687,7 @@ def fig14_rate_vs_delta_bar(training_registry=None, n_ep=None, n_eval=4,
                     feasibility_evidence=feasibility,
                 ))
                 ddpg_rates.append(_eval_agent(
-                    bundle["ddpg"]["agent"], cfg.rho_nmse,
+                    bundle["ddpg"]["agent"], ddpg_comparator_scee(cfg),
                     n_eval=n_eval,
                     seed_base=int(evaluation_seed_base),
                     sensing_only_sinr_min=sensing_only_sinr_min,

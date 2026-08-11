@@ -59,6 +59,14 @@ def build_sensitivity_plan(design="one_at_a_time"):
     """Build a result-independent sensitivity matrix."""
     if design == "one_at_a_time":
         primary = _primary()
+        alternate_los = next(
+            key for key in LOS_PROBABILITY_HYPOTHESES
+            if key != PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID
+        )
+        alternate_coherence = next(
+            key for key in CHANNEL_COHERENCE_HYPOTHESES
+            if key != PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID
+        )
         scenarios = [
             {"id": "primary", "hypotheses": dict(primary)},
             {
@@ -100,15 +108,14 @@ def build_sensitivity_plan(design="one_at_a_time"):
                 "id": "los_standard_mapped_roles",
                 "hypotheses": {
                     **primary,
-                    "los_probability":
-                        "al_hourani_standard_mapped_roles",
+                    "los_probability": alternate_los,
                 },
             },
             {
-                "id": "independent_slot_fading",
+                "id": "episode_block_fading",
                 "hypotheses": {
                     **primary,
-                    "channel_coherence": "independent_slot_fading",
+                    "channel_coherence": alternate_coherence,
                 },
             },
             {

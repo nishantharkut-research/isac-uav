@@ -11,6 +11,8 @@ from calibrate_reproduction import (
     write_calibration_report,
 )
 from parameter_profiles import load_calibrated_profile, profile_from_mapping
+from paper_contract import FIGURE_6_SYSTEM_CONFIGURATION
+from source_integrity import source_tree_digest
 
 
 class CalibratedProfileAuthorityTests(unittest.TestCase):
@@ -99,6 +101,11 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
                     "power_direction_violations": 0,
                 },
             ],
+            "calibration_solver_scope": (
+                "scipy_ao_surrogate_not_author_algorithm3"
+            ),
+            "calibration_system": dict(FIGURE_6_SYSTEM_CONFIGURATION),
+            "source_tree_digest": source_tree_digest(),
         }
         (directory / "power_hypothesis_lock.json").write_text(
             json.dumps(lock), encoding="utf-8"
@@ -197,6 +204,24 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
             profile_path, _report_path, _profile = self._write_pair(directory)
             (Path(directory) / "power_hypothesis_lock.json").unlink()
             with self.assertRaisesRegex(ValueError, "hypothesis lock"):
+                load_calibrated_profile(profile_path)
+
+    def test_stale_source_and_wrong_figure6_system_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path, report_path, _profile = self._write_pair(directory)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["source_tree_digest"] = "0" * 64
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source tree"):
+                load_calibrated_profile(profile_path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path, _report_path, _profile = self._write_pair(directory)
+            lock_path = Path(directory) / "power_hypothesis_lock.json"
+            lock = json.loads(lock_path.read_text(encoding="utf-8"))
+            lock["calibration_system"]["L"] = 40
+            lock_path.write_text(json.dumps(lock), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "calibration system"):
                 load_calibrated_profile(profile_path)
 
     def test_dedicated_runners_use_calibrated_authority_loader(self):

@@ -4,6 +4,8 @@ Matches Tables III & IV of:
   Saikia et al., "Hybrid-RIS Empowered UAV-Assisted ISAC Systems:
   Transfer Learning-Based DRL," IEEE Trans. Commun., 2025.
 """
+from contextlib import contextmanager
+
 import numpy as np
 from physical_hypotheses import (
     dbm_to_watts,
@@ -27,7 +29,7 @@ from ambiguity_hypotheses import (
 
 __all__ = [
     "Config", "cfg", "dbm_to_watts", "dbw_to_watts", "watts_to_dbm",
-    "watts_to_dbw",
+    "watts_to_dbw", "temporary_system_configuration",
 ]
 
 
@@ -127,8 +129,8 @@ class Config:
     # a=9.61, b=0.16 for dense urban (Al-Hourani et al., GLOBECOM 2014)
     a_env  = 9.61
     b_env  = 0.16
-    # Eq. (6) and the cited urban formula use opposite symbol roles. Both
-    # interpretations are executable; the paper-literal branch is primary.
+    # Eq. (6) and the conventional urban formula use opposite symbol roles.
+    # The printed equation is primary; the external convention is sensitivity.
     los_probability_hypothesis_id = PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID
     # Endpoint parameterization of the paper's Eq. (5):
     #   zeta(phi) = P_LoS(phi) * zeta_e + zeta_0.
@@ -156,9 +158,8 @@ class Config:
     sigma2_bu   = rho_nmse
     sigma2_bk   = rho_nmse
 
-    # The pCSI state contains instantaneous channel coefficients. Holding one
-    # latent fading realization per episode keeps those coefficients relevant
-    # to the action while geometry and target Doppler evolve each slot.
+    # Algorithm 1 samples inside the time-step loop. The next realization is
+    # exposed in the next pCSI state before the corresponding action is scored.
     channel_coherence_hypothesis_id = (
         PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID
     )
@@ -263,3 +264,40 @@ def _factor_upa(n: int):
 # Import THIS object in every module:  from config import cfg
 # Never do  cfg = Config()  in other files — that breaks L-sweep patching.
 cfg = Config()
+
+
+@contextmanager
+def temporary_system_configuration(**overrides):
+    """Temporarily apply validated paper-system dimensions and restore them."""
+    allowed = {"M", "N", "U", "K", "L", "La", "Lp"}
+    unknown = set(overrides) - allowed
+    if unknown:
+        raise ValueError(f"Unknown system dimensions: {sorted(unknown)}")
+    dimensions = {
+        key: int(overrides.get(key, getattr(cfg, key))) for key in allowed
+    }
+    if any(dimensions[key] <= 0 for key in ("M", "N", "U", "K", "L")):
+        raise ValueError("M, N, U, K, and L must be positive.")
+    if "La" in overrides and "Lp" not in overrides:
+        dimensions["Lp"] = dimensions["L"] - dimensions["La"]
+    elif "Lp" in overrides and "La" not in overrides:
+        dimensions["La"] = dimensions["L"] - dimensions["Lp"]
+    if dimensions["La"] < 0 or dimensions["Lp"] < 0:
+        raise ValueError("La and Lp must be nonnegative.")
+    if dimensions["La"] + dimensions["Lp"] != dimensions["L"]:
+        raise ValueError("System dimensions require La + Lp == L.")
+
+    fields = (
+        "M", "N", "U", "K", "L", "La", "Lp",
+        "Lax", "Lay", "Lpx", "Lpy",
+    )
+    saved = {field: getattr(cfg, field) for field in fields}
+    try:
+        for key in allowed:
+            setattr(cfg, key, dimensions[key])
+        cfg.Lax, cfg.Lay = _factor_upa(cfg.La) if cfg.La else (1, 1)
+        cfg.Lpx, cfg.Lpy = _factor_upa(cfg.Lp) if cfg.Lp else (1, 1)
+        yield cfg
+    finally:
+        for field, value in saved.items():
+            setattr(cfg, field, value)

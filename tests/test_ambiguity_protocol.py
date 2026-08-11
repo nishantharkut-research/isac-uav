@@ -36,7 +36,7 @@ class AmbiguityProtocolTests(unittest.TestCase):
                 "wfb_channel_independent_dft",
                 "ddpg_icsi_comparator",
                 "los_standard_mapped_roles",
-                "independent_slot_fading",
+                "episode_block_fading",
                 "receiver_consistent_cross_interference",
             ],
         )
@@ -78,7 +78,7 @@ class AmbiguityProtocolTests(unittest.TestCase):
             {"ddpg_comparator_csi_hypothesis_id": "icsi_comparator"},
             {"los_probability_hypothesis_id":
              "al_hourani_standard_mapped_roles"},
-            {"channel_coherence_hypothesis_id": "independent_slot_fading"},
+            {"channel_coherence_hypothesis_id": "episode_block_fading"},
             {"cross_function_interference_hypothesis_id":
              "receiver_consistent_cross_channels"},
         ]
@@ -131,7 +131,7 @@ class AmbiguityProtocolTests(unittest.TestCase):
         )
         self.assertEqual(
             manifest["channel_coherence_hypothesis_id"],
-            "episode_block_fading",
+            "independent_slot_fading",
         )
         self.assertEqual(
             manifest["cross_function_interference_hypothesis_id"],
@@ -319,7 +319,7 @@ class AmbiguityProtocolTests(unittest.TestCase):
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
             "los_probability_hypothesis_id": "paper_eq6_literal_roles",
-            "channel_coherence_hypothesis_id": "episode_block_fading",
+            "channel_coherence_hypothesis_id": "independent_slot_fading",
             "cross_function_interference_hypothesis_id":
                 "paper_eq12_eq14_literal_cross_channels",
         }
@@ -364,7 +364,7 @@ class AmbiguityProtocolTests(unittest.TestCase):
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
             "los_probability_hypothesis_id": "paper_eq6_literal_roles",
-            "channel_coherence_hypothesis_id": "episode_block_fading",
+            "channel_coherence_hypothesis_id": "independent_slot_fading",
             "cross_function_interference_hypothesis_id":
                 "paper_eq12_eq14_literal_cross_channels",
         }

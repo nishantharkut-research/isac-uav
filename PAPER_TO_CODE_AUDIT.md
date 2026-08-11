@@ -9,8 +9,8 @@
 | Eqs. (10)-(11), composite channels | `ChannelSet.composite_ue`, `ChannelSet.composite_te` | Passive path serves communication users and active path serves sensing targets, plus direct links. |
 | Eqs. (12)-(15), SINR/rates | `sinr_rate.compute_rates` | Per-user and per-target rates. The printed cross-function channels are reproduction-primary; receiver-consistent channels are a predeclared sensitivity. Eq. (12)'s target-indexed active-noise channel in a UE denominator is represented by the mean target-channel active-noise power because the paper gives no UE-target index mapping. |
 | Eq. (16), baseline objective | `ObjectiveSpec.paper`, `evaluate_objective` | Exactly `sum_u R_u`; sensing remains a hard rate constraint. |
-| Eqs. (16a)-(16b), phase/amplification | `environment._controls_from_action`, `_find_feasible_controls` | Unit passive phases, bounded active phases and amplitudes. Infeasible proposals use a deterministic descending path scan plus refinement; no monotone-feasibility assumption is made. If both endpoints fail, bounded zero/half/full-gain phase templates are tested on the same channel. Replay receives the executed control. |
-| Eq. (16c), passive cascade | `paper_contract.cascade_power_16c` | Checked as a physical feasibility condition. |
+| Eqs. (16a)-(16b), phase/amplification | `environment._controls_from_action`, `_find_feasible_controls` | Unit passive phases, bounded active phases and amplitudes. Infeasible proposals use a deterministic descending path scan plus refinement; no monotone-feasibility assumption is made. If both endpoints fail, bounded zero/half/full-gain phase templates are tested on the same channel. Replay receives the policy proposal; deterministic projection is part of the environment transition and the executed control remains diagnostic evidence. |
+| Eq. (16c), passive cascade | `paper_contract.cascade_power_16c` | Checked as the squared Frobenius norm of the coherent passive-element sum, including cross-element terms. |
 | Eqs. (16d), (18), active power | `sinr_rate.active_tx_power` | Aggregate active power checked separately. Beam columns already contain square-root watts, so BS power is not multiplied twice. |
 | Eq. (16e), target rate | `ObjectiveSpec.target_rate_min`, beam allocation | Per-target floor. The paper omits its numeric value. |
 | Eq. (16f), total BS power | `beamformers_from_powers` | Per-stream nonnegative powers sum to at most `P_T`. |
@@ -19,7 +19,7 @@
 | Eqs. (20)-(25), SCEE | `ChannelSet`, `_compute_scee_rates` | Estimated channels plus effective error covariance and matrix log-determinant rates. The matrix model is used at both zero and positive estimation error so no formula-switch discontinuity occurs. |
 | Eqs. (26)-(29), DDPG | `ddpg_agent.DDPGAgent` | Replay, Bellman critic update, deterministic actor update, and soft targets using `self.tau`. |
 | Eq. (30), transfer value | `dtl_agent.DTLAgent` | Primary: current source Q blended with the Eq. (26) target Bellman value. Sensitivity: source/target next-state continuation blend. Terminal transitions use raw reward and never reintroduce bootstrap value. |
-| Algorithms 2-3, AO | `ao_optimizer.py` | Numerical SciPy constrained approximation because the author CVX implementation and auxiliary values are unavailable. Published convergence histories are raw iterates; best-feasible tracking affects only the returned final solution. |
+| Algorithms 2-3, AO | `ao_optimizer.py` | Disclosed numerical SciPy surrogate because the author CVX implementation and executable auxiliary details are unavailable. It uses beam direction/power allocation, direct phase optimization, and a one-step trajectory block; it is not the full MMSE/CVX/SCA algorithm. Published convergence histories are raw iterates; best-feasible tracking affects only the returned final solution. |
 | Fig. 4 reward | `simulation.train_ddpg`, `train_dtl`, `plot_baseline.py` | Raw communication rate only. No penalty plot is produced. Endpoints use the final 100 training episodes; full-curve acceptance independently recomputes a fixed 20-episode causal average at all 15 digitized paper markers. |
 
 ## Objective separation
@@ -66,6 +66,13 @@ branches minimize unsupported mechanics or follow the strongest semantic
 evidence. `run_ambiguity_sensitivity.py` executes one-factor alternatives by
 default and can execute the full 256-combination factorial.
 
+Printed Eq. (6) is primary because it also agrees with the paper's high-LoS
+text; the standard Al-Hourani role mapping is sensitivity. Algorithm 1's
+per-time-step channel sampling is primary, but the realization is exposed before
+its action is scored. Episode-block fading is sensitivity. Statistical-CSI
+states omit channel coefficients; instantaneous CSI adds them, and ParCSI uses a
+fixed mask.
+
 The primary DDPG comparator uses pCSI, matching DTL-pCSI so an algorithmic
 comparison does not also change channel-estimation quality. The earlier iCSI
 DDPG interpretation is retained only as `icsi_comparator` sensitivity. This
@@ -88,10 +95,16 @@ paper_db_as_dbw: 10 dB label -> 10 dBW -> 10 W
 
 Both use common Figure 6 calibration seeds. Infeasible branches, pCSI/iCSI
 ordering violations, material power-direction reversals, less than half the
-paper's total power response, and normalized curve error above `0.15` are hard
-rejections. Remaining branches are ranked by normalized curve error and slope
-error. The selection is locked before Figure 4 or any other holdout is
-evaluated. A larger simulated reward is not a selection criterion.
+paper's total power response, and curve RMSE above three digitization-uncertainty
+units are hard rejections. Remaining branches are ranked by normalized curve
+error and slope error. The selection is locked before Figure 4 or any other
+holdout is evaluated. A larger simulated reward is not a selection criterion.
+
+The calibration system is `M=4`, `N=2`, `U=K=3`, `L=20`, `La=Lp=10`. The
+equal split is declared rather than reported: Figure 6's `L=20` conflicts with
+the general `La=20` statement and the paper's `La <= Lp` constraint. Profile,
+report, lock, and preparation authority are bound to the current source-tree
+digest, so earlier artifacts cannot authorize changed code.
 
 ## Values not numerically disclosed by the paper
 
@@ -103,6 +116,9 @@ evaluated. A larger simulated reward is not a selection criterion.
 - usable scalar `tau` (Table IV prints `{0,1}`);
 - transfer weight and any time schedule;
 - exact replacement beamformer used by DTL-WFB;
+- active/passive split for Figure 6, standalone DDPG comparator CSI, and the
+  construction of the partial-CSI observation mask;
+- the usable coherence interval needed to apply Eq. (19);
 - exact Capon sample covariance and AO/CVX implementation;
 - UE-region origin and target speed;
 - Table III's target-noise versus active-noise symbol mapping;

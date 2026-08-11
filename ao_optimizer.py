@@ -18,7 +18,7 @@ from channel_model import ChannelSet
 from paper_contract import (
     active_power_penalty,
     cascade_penalty_16c,
-    joint_sum_rate,
+    communication_sum_rate,
 )
 from sinr_rate import (
     active_tx_power,
@@ -46,7 +46,7 @@ def _score_beamformers(ch: ChannelSet,
                        T: np.ndarray,
                        sensing_rate_min: float = None) -> float:
     rate_u, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
-    return joint_sum_rate(rate_u, rate_k)
+    return communication_sum_rate(rate_u)
 
 
 def _constraint_diagnostics(ch: ChannelSet,
@@ -166,7 +166,7 @@ def _scee_phase_objective(beta_vec: np.ndarray,
         theta = np.exp(1j * beta_vec)
         phi   = _current_phi
         rate_u, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
-        return -joint_sum_rate(rate_u, rate_k)
+        return -communication_sum_rate(rate_u)
     else:
         La    = cfg.La
         phi_p = beta_vec[:La]
@@ -175,7 +175,7 @@ def _scee_phase_objective(beta_vec: np.ndarray,
         phi   = alpha * np.exp(1j * phi_p)
         theta = _current_theta
         rate_u, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
-        return -joint_sum_rate(rate_u, rate_k)
+        return -communication_sum_rate(rate_u)
 
 
 def _phase_constraint_values(beta_vec, ch, C, T, is_passive):
@@ -480,7 +480,7 @@ def run_ao(pos_uav:  np.ndarray,
     rate_u, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
     cur_sum_rate = float(np.sum(rate_u))
     cur_sensing_rate = float(np.sum(rate_k))
-    cur_objective = joint_sum_rate(rate_u, rate_k)
+    cur_objective = communication_sum_rate(rate_u)
     cur_feasible, cur_diagnostics = _constraint_diagnostics(
         ch, theta, phi, C, T, rate_k,
         sensing_rate_min=sensing_rate_min,
@@ -534,7 +534,7 @@ def run_ao(pos_uav:  np.ndarray,
         rate_u, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
         cur_sum_rate = float(np.sum(rate_u))
         cur_sensing_rate = float(np.sum(rate_k))
-        cur_objective = joint_sum_rate(rate_u, rate_k)
+        cur_objective = communication_sum_rate(rate_u)
         cur_feasible, cur_diagnostics = _constraint_diagnostics(
             ch, theta, phi, C, T, rate_k,
             sensing_rate_min=sensing_rate_min,

@@ -579,6 +579,9 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
                holdout_seeds=HOLDOUT_SEEDS,
                stress_seeds=STRESS_SEEDS):
     """Rank on calibration, then require strict holdout and stress passes."""
+    from source_integrity import source_tree_digest
+
+    source_digest = source_tree_digest()
     calibration_seeds = tuple(calibration_seeds)
     holdout_seeds = tuple(holdout_seeds)
     stress_seeds = tuple(stress_seeds)
@@ -635,6 +638,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
     holdout_accepted, holdout_reasons = structural_acceptance(holdout_metrics)
     holdout_report = {
         "schema_version": 1,
+        "source_tree_digest": source_digest,
         "source_candidate_digest": selected["profile"].digest,
         "seeds": list(holdout_seeds),
         "action_probes": list(ACTION_PROBE_LABELS),
@@ -678,6 +682,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
             "calibration_score": selected["score"]["score"],
             "holdout_score": holdout_score["score"],
             "paper_curve_ordinates_used": False,
+            "source_tree_digest": source_digest,
         },
     }
     identified = profile_from_mapping(identified_payload)
@@ -688,6 +693,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
     stress_accepted, stress_reasons = structural_acceptance(stress_metrics)
     stress_report = {
         "schema_version": 1,
+        "source_tree_digest": source_digest,
         "profile_digest": identified.digest,
         "seeds": list(stress_seeds),
         "action_probes": list(ACTION_PROBE_LABELS),
@@ -710,6 +716,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
 
     manifest = {
         "schema_version": 1,
+        "source_tree_digest": source_digest,
         "method": "structural parameter identification",
         "selection_rule": (
             "minimum predeclared structural score among strict calibration "

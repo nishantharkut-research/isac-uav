@@ -102,7 +102,7 @@ def _require_step_info(info: Mapping) -> tuple[float, float, np.ndarray]:
     required = (
         "communication_sum_rate",
         "sensing_sum_rate",
-        "executed_action",
+        "proposed_action",
         "physical_constraints_feasible",
     )
     missing = [key for key in required if key not in info]
@@ -112,10 +112,10 @@ def _require_step_info(info: Mapping) -> tuple[float, float, np.ndarray]:
     sensing = float(info["sensing_sum_rate"])
     if not np.isfinite(communication) or not np.isfinite(sensing):
         raise ValueError("Physical reward components must be finite.")
-    executed_action = np.asarray(info["executed_action"], dtype=np.float32)
-    if not np.all(np.isfinite(executed_action)):
-        raise ValueError("Executed action must be finite.")
-    return communication, sensing, executed_action
+    proposed_action = np.asarray(info["proposed_action"], dtype=np.float32)
+    if not np.all(np.isfinite(proposed_action)):
+        raise ValueError("Proposed action must be finite.")
+    return communication, sensing, proposed_action
 
 
 def train_ba_pcdtl(
@@ -200,10 +200,10 @@ def train_ba_pcdtl(
                 return_info=True,
             )
             next_state, _ignored_scalar_reward, done, info = environment.step(action)
-            communication, sensing, executed_action = _require_step_info(info)
+            communication, sensing, proposed_action = _require_step_info(info)
             agent.replay.push(
                 state,
-                executed_action,
+                proposed_action,
                 [communication, sensing],
                 next_state,
                 done,
@@ -321,7 +321,7 @@ def evaluate_preference_grid(
                     return_info=True,
                 )
                 state, _ignored_scalar_reward, done, info = environment.step(action)
-                communication, sensing, _executed_action = _require_step_info(info)
+                communication, sensing, _proposed_action = _require_step_info(info)
                 rate_u = np.asarray(info.get("rate_u"), dtype=np.float64)
                 rate_k = np.asarray(info.get("rate_k"), dtype=np.float64)
                 if (

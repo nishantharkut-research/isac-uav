@@ -293,9 +293,9 @@ class ResultValidationTests(unittest.TestCase):
                 "target_rate_min": 0.5,
             },
             "feasibility_rate": 1.0,
-            "communication_seed_values": [7.0, 7.1, 7.2, 7.1, 7.0],
+            "communication_seed_values": [9.5, 9.6, 9.55, 9.58, 9.52],
             "sensing_seed_values": [3.2, 3.3, 3.25, 3.28, 3.22],
-            "joint_seed_values": [10.2, 10.4, 10.45, 10.38, 10.22],
+            "joint_seed_values": [12.7, 12.9, 12.8, 12.86, 12.74],
             "minimum_ue_rate_seed_values": [0.8] * 5,
             "minimum_target_rate_seed_values": [0.9] * 5,
             "seed_records": [
@@ -305,12 +305,28 @@ class ResultValidationTests(unittest.TestCase):
         }
         report = self._validate_extension(extension, baseline)
         self.assertTrue(report["overall_pass"], report)
+        self.assertTrue(report["checks"]["positive_paired_joint_gain"]["pass"])
         self.assertNotIn("communication_retention", report["checks"])
 
         failing = copy.deepcopy(extension)
         failing["minimum_target_rate_seed_values"][0] = 0.1
         self.assertFalse(
             self._validate_extension(failing, baseline)["overall_pass"]
+        )
+
+        no_gain = copy.deepcopy(extension)
+        no_gain["communication_seed_values"] = [7.0] * 5
+        no_gain["joint_seed_values"] = [
+            communication + sensing
+            for communication, sensing in zip(
+                no_gain["communication_seed_values"],
+                no_gain["sensing_seed_values"],
+            )
+        ]
+        no_gain_report = self._validate_extension(no_gain, baseline)
+        self.assertFalse(no_gain_report["overall_pass"])
+        self.assertFalse(
+            no_gain_report["checks"]["positive_paired_joint_gain"]["pass"]
         )
 
 

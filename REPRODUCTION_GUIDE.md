@@ -6,8 +6,8 @@ This package supports two sequential studies:
 
 1. **Journal reproduction:** communication sum-rate maximization with sensing
    rate and physical constraints.
-2. **Research extension:** exact joint communication-sensing optimization with
-   BA-PCDTL and paired Pareto evaluation.
+2. **Research extension:** joint communication-sensing objective optimization
+   with BA-PCDTL and paired Pareto evaluation.
 
 The package contains source code, tests, the paper PDF, the supplied problem
 PNG, profiles, and documentation. It contains no accepted trained result.
@@ -23,7 +23,10 @@ corresponding validators return exit code `0`.
 - Per-UE and per-target floors remain hard constraints.
 - Phase, active gain, BS power, active-HRIS power, passive cascade, UAV bounds,
   UAV step, and UAV closure remain hard physical constraints.
-- Replay stores the action executed after hard feasibility projection.
+- Replay stores the policy's proposed action. Hard feasibility projection is
+  part of the environment transition, so the critic learns the return produced
+  by that proposal under the declared safety dynamics. The projected action is
+  retained in diagnostics for auditability.
 - Every transition checks UAV return reachability and exact final-slot closure.
   A failed proposal is recovered deterministically on the same sampled channel;
   neither channel nor scene is resampled to obtain a better result.
@@ -34,6 +37,11 @@ corresponding validators return exit code `0`.
 - Test scenes never select a model, normalizer, gate parameter, preference, or
   hyperparameter.
 - A larger plotted curve alone is not evidence of improvement.
+- Equation (16c) is evaluated as the squared Frobenius norm of the coherent
+  sum over passive elements, not as a sum of separate element powers.
+- Statistical-CSI states contain HRIS controls, UAV position, and precoders.
+  Instantaneous-CSI states additionally contain channel coefficients; ParCSI
+  uses an explicit deterministic coefficient mask.
 
 No neural method can guarantee strict improvement on unseen stochastic
 channels. The code therefore uses a fail-closed statistical acceptance rule
@@ -86,9 +94,11 @@ python -m compileall -q .
 
 Do not continue if either command fails.
 
-This source tree has its own immutable digest. Do not copy checkpoints or result
-folders from an older package into these `runs` directories. Any source change
-requires new baseline and extension runs.
+This source tree has its own immutable digest. Preparation, calibration,
+checkpoints, and results are bound to it and old artifacts fail validation.
+Do not copy result folders from an older package into these `runs` directories.
+Any executable source change requires fresh preparation, calibration, baseline,
+and extension runs.
 
 ## 5. Prepare Omitted Parameters
 
@@ -118,6 +128,12 @@ The paper labels transmitter power in `dB` without stating dBm or dBW. The code
 evaluates both predeclared interpretations on Figure 6 calibration data and
 locks the feasible branch before any holdout or RL result is viewed.
 
+Calibration runs with `M=4`, `N=2`, `U=K=3`, and `L=20`. The first four values
+come from Table III and `L=20` comes from the Figure 6 text. The paper's general
+`La=20` statement conflicts with `L=20` and the stated `La <= Lp` constraint, so
+the executable Figure 6 contract declares the feasible equal split
+`La=Lp=10`. This is an assumption, not a reported author value.
+
 ```powershell
 python calibrate_reproduction.py `
   --base-profile runs\01_prepared\identified_profile.json `
@@ -142,8 +158,14 @@ Do not switch the locked branch after inspecting another result.
 
 Calibration fails instead of writing a selection lock when neither branch has
 the required pCSI/iCSI ordering, monotone power direction, at least half the
-paper's total power response, and normalized curve error at most `0.15`. A
-failure here is a model-identification failure; do not proceed to training.
+paper's total power response, and curve RMSE within three declared digitization
+uncertainty units. With Figure 6 uncertainty `0.08 bits/s/Hz`, this is a
+`0.24 bits/s/Hz` RMSE ceiling. A failure here is a model-identification failure;
+do not proceed to training.
+
+The calibration solver is the disclosed constrained SciPy AO surrogate. It is
+not the authors' unpublished CVX/SCA implementation of Algorithms 2-3, and the
+solver identity is bound into the profile, report, and selection lock.
 
 For an omitted-parameter sensitivity branch, repeat the complete calibration in
 a new empty output directory and fix the value before any simulated curve is
@@ -292,11 +314,14 @@ quantitative acceptance. The holdout runner is a long training/optimization
 workflow; it checkpoints each declared unit and never chooses a scenario from
 its observed result.
 
-The paper does not provide the authors' CVX implementation or every auxiliary
-matrix needed to reproduce Algorithms 2-3 byte-for-byte. The bundled AO method
-is a disclosed constrained SciPy surrogate with a one-step trajectory block.
-A passing holdout means its generated curves agree with the declared paper
-tolerances; it does not claim recovery of unpublished author source code.
+The paper does not provide the authors' CVX implementation or every executable
+detail needed to reconstruct Algorithms 2-3. The bundled AO method is a
+disclosed constrained SciPy surrogate: it optimizes beam directions and stream
+powers, directly optimizes HRIS phases, and uses a one-step trajectory block.
+It is not an implementation of the paper's full MMSE/CVX/SCA alternating
+optimizer. A passing holdout means this declared surrogate agrees with the
+digitized curves within the locked tolerances; it does not prove equivalence to
+the unpublished author solver.
 
 ## 10. Inspect the BA-PCDTL Plan Without Training
 
@@ -542,10 +567,13 @@ python run_ambiguity_sensitivity.py `
 
 This base-reproduction ambiguity study executes eight isolated alternatives to
 the accepted primary: noise mapping, Equation 30 update, transfer schedule, WFB
-replacement, DDPG iCSI, LoS symbol-role mapping, independent slot fading, and
-receiver-consistent cross-function interference. The report contains paired
-deltas and no selected winner. The optional `--design full_factorial` executes
-all 256 predeclared combinations and is substantially more expensive.
+replacement, DDPG iCSI, the standard Al-Hourani LoS role mapping, episode-block
+fading, and receiver-consistent cross-function interference. The primary follows
+printed Eq. (6) and Algorithm 1's per-time-step channel sampling. Each action is
+evaluated on the realization exposed by its state; the next realization is
+sampled before the next instantaneous-CSI state is returned. The report contains
+paired deltas and no selected winner. The optional `--design full_factorial`
+executes all 256 predeclared combinations and is substantially more expensive.
 
 ## 17. Legacy Sensitivity Modes
 
@@ -575,15 +603,17 @@ must be labeled historical and is not the strongest publication comparator.
 ## 18. Failure Interpretation
 
 - **Baseline validation fails:** do not start or claim the extension.
-- **Source-tree mismatch:** regenerate the baseline with this exact package.
+- **Preparation/calibration source mismatch:** rerun preparation and calibration
+  in new empty directories before any baseline work.
+- **Baseline source-tree mismatch:** regenerate the baseline with this package.
 - **Checkpoint hash or identity mismatch:** restore the original payload or use
   a new output directory; do not edit the checkpoint.
 - **Same-channel recovery exhausted:** preserve proposal, previous-control, and
   deterministic-candidate diagnostics; do not resample the scene.
 - **Gate-lock mismatch:** test evidence is invalid and must not be combined.
 - **Rate-floor or feasibility failure:** the method fails the physical contract.
-- **Joint confidence interval crosses zero:** improvement over same-objective DTL
-  is not established.
+- **Joint confidence interval crosses zero:** improvement over the paired
+  communication-plus-sensing baseline is not established.
 - **Hypervolume confidence interval crosses zero:** publication-level Pareto
   improvement is not established.
 - **Nonfinite critic or result:** preserve the last checkpoint and diagnostic;

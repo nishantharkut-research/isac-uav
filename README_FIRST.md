@@ -34,8 +34,9 @@ manifests, seed lists, gate locks, or result arrays.
 Every executed transition is checked for signal, power, HRIS, and UAV
 feasibility, including return reachability and exact final closure. Recovery is
 deterministic on the same sampled channel; it never resamples a favorable
-scene. Source-tree hashes make older results and checkpoints inadmissible after
-code changes, so this final package requires a clean run.
+scene. Source-tree hashes make older preparation, calibration, results, and
+checkpoints inadmissible after code changes, so this package requires a clean
+run from preparation onward.
 
 Before real baseline training, the runner automatically rejects a calibrated
 configuration that is infeasible or effectively insensitive to policy actions.

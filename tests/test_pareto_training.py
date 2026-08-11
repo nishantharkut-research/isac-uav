@@ -53,6 +53,7 @@ class TinyEnvironment:
             "communication_sum_rate": communication,
             "sensing_sum_rate": sensing,
             "joint_rate": communication + sensing,
+            "proposed_action": np.asarray(action, dtype=np.float32),
             "executed_action": executed,
             "physical_constraints_feasible": True,
             "rate_u": np.array([communication]),
@@ -103,7 +104,7 @@ class PreferenceStreamTests(unittest.TestCase):
 
 
 class TrainerTests(unittest.TestCase):
-    def test_trainer_stores_physical_vector_and_executed_action(self):
+    def test_trainer_stores_physical_vector_and_actor_command(self):
         with tempfile.TemporaryDirectory() as directory:
             environment = TinyEnvironment()
             result = train_ba_pcdtl(
@@ -119,7 +120,7 @@ class TrainerTests(unittest.TestCase):
             transitions = result["agent"].replay.state_dict()["transitions"]
             np.testing.assert_array_equal(transitions[0][2], [2.0, 4.0])
             np.testing.assert_array_equal(
-                transitions[0][1], environment.proposed_actions[0] * 0.5
+                transitions[0][1], environment.proposed_actions[0]
             )
 
     def test_interrupted_resume_matches_uninterrupted_training(self):

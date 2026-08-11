@@ -19,7 +19,7 @@ calibration, multi-seed run, and passing validators.
 | ID | Review finding | Disposition |
 |---|---|---|
 | A | SCEE rates jump when NMSE changes from zero | Confirmed symptom. The immediate cause was a switch from scalar Eqs. (12)/(14) at zero error to matrix Eqs. (21)/(25) at any positive error, not the paper-required use of estimated CSI in the numerator. The matrix model is now used continuously, including at zero error. |
-| B | Eq. (6) LoS constants appear swapped | Confirmed paper/model ambiguity, not a uniquely recoverable author value. The printed Eq. (6) roles are the reproduction primary; the standard Al-Hourani role mapping is a predeclared sensitivity. |
+| B | Eq. (6) LoS constants appear swapped | Confirmed paper/model ambiguity, not a uniquely recoverable author value. Printed Eq. (6) is the reproduction primary because it also matches the paper's high-LoS/free-space text; the standard Al-Hourani role mapping is a predeclared non-selecting sensitivity. |
 | C | Eqs. (12)/(14) cross-function channels are likely inconsistent | Confirmed ambiguity. The printed equations remain primary for reproduction; receiver-consistent cross channels are a report-all sensitivity. Both scalar and matrix rate paths implement the same selected hypothesis. |
 | D | Power selection accepts pCSI/iCSI inversion | Confirmed and fixed. Any candidate with an ordering violation is inadmissible. |
 | E | Constraint values were derived from one arbitrary pre-calibration candidate | Confirmed and removed from the identification path. `R_min`, `Psi_max`, and `P_a_max` are disclosed omitted-parameter assumptions/sensitivities, not result-derived structural parameters. |
@@ -30,14 +30,32 @@ calibration, multi-seed run, and passing validators.
 | I | Sensing and cascade-error loops are slow | Confirmed and vectorized. Direct elementwise-equivalence tests protect the numerical equations. |
 | M | Eq. (19) helper has an off-by-one guard and is not in the live pipeline | Guard fixed. The helper remains an explicit utility because the paper does not publish the coherence interval needed to apply it to the reported curves. |
 
-## Additional Defect Found During Correction
+## Additional Defects Found During Correction
 
 The policy state exposed one instantaneous CSI realization, but the environment
-sampled an independent small-scale channel before evaluating the action. This
-made the observed CSI weakly related to the reward and can prevent learning.
-The primary now uses episode-block small-scale fading while geometry and target
-Doppler still evolve each slot. Independent slot fading remains a declared
-sensitivity. The coherence identity and latent seed are checkpoint-bound.
+sampled another small-scale realization before evaluating the action. The
+transition order now evaluates the proposal on the realization represented by
+the current state, then samples the next realization before returning the next
+instantaneous-CSI state. This follows the order in Algorithm 1 without making
+the observed channel irrelevant to the action. Episode-block fading remains a
+declared sensitivity, and coherence identity plus latent seed are
+checkpoint-bound.
+
+The implementation also exposed estimated channel coefficients in every iCSI
+state even though Section III says statistical CSI contains HRIS phases and
+precoders, with coefficients added for instantaneous CSI. Statistical states
+now omit channel coefficients; pCSI includes them; ParCSI explicitly opts into
+a deterministic masked channel observation.
+
+Equation (16c) was implemented as a sum of per-element powers. The paper places
+the passive-element sum inside the squared norm, so cross-element coherent terms
+were missing. The implementation now evaluates the coherent matrix sum before
+the squared Frobenius norm.
+
+Replay previously stored the feasibility-projected action while actor and target
+updates queried the critic at the raw policy proposal. Replay now stores the
+proposal and treats deterministic projection as environment dynamics. Both the
+proposal and executed action remain in transition diagnostics.
 
 ## Calibration Acceptance
 
@@ -48,10 +66,19 @@ when all of the following hold:
 2. no pCSI/iCSI ordering violation occurs;
 3. no material communication-rate reversal occurs as transmitter power rises;
 4. each AO curve recovers at least 50% of the paper's 10-to-30 dB response;
-5. normalized Figure 6 curve error is at most 0.15.
+5. Figure 6 curve RMSE is at most three digitization-uncertainty units
+   (`0.24 bits/s/Hz` for the declared `0.08` uncertainty).
 
 If neither dBm nor dBW interpretation passes, calibration stops. It does not
 select the less-bad branch and does not proceed to DRL training.
+
+Calibration now uses the Figure 6 system contract (`M=4`, `N=2`, `U=K=3`,
+`L=20`, `La=Lp=10`) instead of silently inheriting the default `L=40` system.
+The equal active/passive split is a disclosed assumption required to reconcile
+Figure 6's `L=20` with the paper's otherwise contradictory `La=20` statement and
+`La <= Lp` constraint. Calibration artifacts are also source-tree bound and
+explicitly identify the SciPy AO surrogate; an artifact from old executable
+source cannot authorize a new run.
 
 ## Reward and Constraints
 
@@ -78,6 +105,29 @@ Pareto anchors and preference-stream position. Run manifests and plot sidecars
 include every physical ambiguity identity. A source, profile, anchor, seed,
 objective, or hypothesis mismatch fails resume and evidence validation.
 
+Preparation status, structural search, holdout, stress, preflight, calibrated
+profile, calibration report, and power lock now carry and validate the same
+source-tree digest. Figure 14 evaluates the DDPG comparator with the same locked
+CSI hypothesis used during its training. Legacy extension validators now require
+a positive paired confidence lower bound over the corresponding baseline; mere
+feasibility can no longer be reported as improvement.
+
+## Remaining Reproduction Boundary
+
+The code does not implement the complete MMSE/CVX/SCA AO procedure in paper
+Algorithms 2-3. Its AO path is a constrained SciPy surrogate with beam
+direction/power allocation, direct phase optimization, and a one-step UAV
+trajectory block. The paper also omits the executable coherence interval for
+Eq. (19), the exact DDPG comparator CSI, partial-CSI mask construction, transfer
+domains, and enough detail to recover Eq. (30) as unique code. These are locked
+assumptions or report-all sensitivities, not hidden fitted choices.
+
+Therefore this revision is an auditable implementation and experiment protocol,
+not a guarantee that the paper's numerical curves have already been reproduced.
+That claim requires fresh runs and passing validators, and AO agreement would
+still be agreement of the disclosed surrogate rather than proof of author-solver
+equivalence.
+
 ## Required Fresh Execution
 
 Follow `REPRODUCTION_GUIDE.md` from preparation onward in new empty `runs`
@@ -86,4 +136,3 @@ runner automatically performs a no-training action-response and feasibility
 gate before creating training checkpoints. A failed calibration, pre-training
 gate, baseline validator, or holdout validator means reproduction has not been
 established and the extension must not be presented as an improvement.
-

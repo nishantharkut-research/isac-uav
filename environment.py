@@ -109,6 +109,7 @@ class HRISUAVISACEnv:
                  use_capon=None, sensing_rate_min: float = None,
                  sensing_only_sinr_min: float = 0.0,
                  csi_observation_fraction: float = 1.0,
+                 observe_instantaneous_csi: bool = None,
                  objective_spec: ObjectiveSpec = None,
                  allocation_mode: str = "fast",
                  sensing_beamformer_mode=None):
@@ -132,6 +133,12 @@ class HRISUAVISACEnv:
         self.objective_spec = objective_spec
         self.sensing_rate_min = objective_spec.target_rate_min
         self.sensing_only_sinr_min = float(sensing_only_sinr_min)
+        effective_scee = cfg.rho_nmse if sigma2_scee is None else sigma2_scee
+        self.observe_instantaneous_csi = (
+            bool(float(effective_scee) <= 0.0)
+            if observe_instantaneous_csi is None
+            else bool(observe_instantaneous_csi)
+        )
         self.csi_observation_fraction = float(csi_observation_fraction)
         if allocation_mode not in {"fast", "scipy"}:
             raise ValueError("allocation_mode must be 'fast' or 'scipy'.")
@@ -142,15 +149,15 @@ class HRISUAVISACEnv:
         self._channel_rng = np.random.default_rng(seed)
 
         self.action_dim = cfg.Lp + cfg.La + cfg.La + 2
+        channel_feature_count = 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
         self.state_dim = (
             2 * cfg.Lp + 2 * cfg.La + 3
             + 2 * cfg.M * (cfg.U + cfg.K)
-            + 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
+            + (channel_feature_count if self.observe_instantaneous_csi else 0)
         )
-        channel_feature_count = 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
         visible_count = int(round(
             self.csi_observation_fraction * channel_feature_count
-        ))
+        )) if self.observe_instantaneous_csi else 0
         self.csi_observation_mask = np.zeros(channel_feature_count, dtype=bool)
         mask_order = np.random.default_rng(17_291).permutation(channel_feature_count)
         self.csi_observation_mask[mask_order[:visible_count]] = True
@@ -276,11 +283,9 @@ class HRISUAVISACEnv:
         coherence = get_channel_coherence_hypothesis(
             cfg.channel_coherence_hypothesis_id
         )
-        channel_seed = (
-            int(self._channel_rng.integers(0, 2**32 - 1))
-            if coherence.resample_each_slot
-            else int(self._episode_channel_seed)
-        )
+        # This realization was exposed by reset() or the preceding step. The
+        # selected action must be evaluated on the channel present in its state.
+        channel_seed = int(self._episode_channel_seed)
         previous_powers = self.beam_info.get("stream_powers")
         controls, assessment, projection_fraction = self._find_feasible_controls(
             previous_controls,
@@ -314,6 +319,15 @@ class HRISUAVISACEnv:
         self.last_sum_rate = sum_r
         self.t += 1
         done    = self.t >= cfg.N_slots
+
+        if coherence.resample_each_slot and not done:
+            self._episode_channel_seed = int(
+                self._channel_rng.integers(0, 2**32 - 1)
+            )
+            self._refresh_channel(
+                self._episode_channel_seed,
+                slot_time_s=self.t * cfg.delta_T,
+            )
 
         return (self._build_state(),
                 reward,
@@ -874,15 +888,15 @@ class HRISUAVISACEnv:
 
     def _build_state(self) -> np.ndarray:
         """
-        State vector (with channel CSI, Sec. III):
+        State vector (Sec. III):
           s = [Re/Im of passive & active phase vectors,
                normalised UAV position,
                Re/Im of C and T,
                Re/Im of full per-user and per-target composite channels]
 
-        For pCSI (sigma2=0): effective channels from perfect estimates.
-        For iCSI (sigma2>0): effective channels from SCEE-noisy estimates.
-        The estimated channels are already in self.ch (built at reset/refresh).
+        Instantaneous CSI adds effective channel coefficients. Statistical CSI
+        contains phases, UAV position, and precoders only. ParCSI explicitly
+        opts into a deterministic channel-observation mask.
         """
         theta_c = np.exp(1j * self.theta_phase)              # (Lp,)
         phi_c   = self.alpha * np.exp(1j * self.phi_phase)   # (La,)
@@ -891,25 +905,27 @@ class HRISUAVISACEnv:
                                              cfg.z_UAV + 1.0])
         _a_max = cfg.alpha_max + 1e-9
 
-        H_bar_u = self.ch.composite_ue(theta_c)               # list[U] of (N,M)
-        H_bar_k = self.ch.composite_te(phi_c)                 # list[K] of (N,M)
-        h_eff_u = np.concatenate([H.ravel() for H in H_bar_u])
-        h_eff_k = np.concatenate([H.ravel() for H in H_bar_k])
         precoders = np.concatenate([self.C.ravel(), self.T.ravel()])
         precoder_scale = np.sqrt(max(cfg.PT, 1e-12))
 
         # Use episode-level scale (fixed at reset from random-phase h_eff).
         # As phases improve within the episode, h_eff magnitude grows relative
         # to this baseline — giving the DRL a visible within-episode reward signal.
-        observed_channels = np.concatenate([
-            h_eff_u.real / self._ch_scale,
-            h_eff_u.imag / self._ch_scale,
-            h_eff_k.real / self._ch_scale,
-            h_eff_k.imag / self._ch_scale,
-        ])
-        observed_channels = np.where(
-            self.csi_observation_mask, observed_channels, 0.0
-        )
+        observed_channels = np.empty(0, dtype=float)
+        if self.observe_instantaneous_csi:
+            H_bar_u = self.ch.composite_ue(theta_c)
+            H_bar_k = self.ch.composite_te(phi_c)
+            h_eff_u = np.concatenate([H.ravel() for H in H_bar_u])
+            h_eff_k = np.concatenate([H.ravel() for H in H_bar_k])
+            observed_channels = np.concatenate([
+                h_eff_u.real / self._ch_scale,
+                h_eff_u.imag / self._ch_scale,
+                h_eff_k.real / self._ch_scale,
+                h_eff_k.imag / self._ch_scale,
+            ])
+            observed_channels = np.where(
+                self.csi_observation_mask, observed_channels, 0.0
+            )
 
         s = np.concatenate([
             theta_c.real, theta_c.imag,                          # 2 Lp  ∈ [-1, 1]

@@ -92,7 +92,8 @@ The extension implementation was verified without launching full DRL training.
 Focused tests cover vector-reward replay, exact PNG scalarization, immutable
 training-only anchors, Pareto hypervolume, paired intervals, zero-residual
 baseline equivalence, vector Bellman targets, critic uncertainty fallback,
-executed-action replay, deterministic Sobol resume, seed-role separation,
+proposed-action replay with projected-action diagnostics, deterministic Sobol
+resume, seed-role separation,
 validation-only gate locking, full checkpoint identity, publication-level
 independent-policy comparison, deterministic same-channel feasibility recovery,
 UAV return reachability/final closure, and hashed plot evidence.
@@ -110,7 +111,8 @@ The final source was checked without DRL training using the complete fast test
 suite and Python bytecode compilation. The suite covers equation contracts,
 power units, SCEE covariance, objective separation, hard feasibility,
 nonmonotone action projection, same-channel recovery, final-slot UAV closure,
-per-stream allocation, raw curve validation,
+per-stream allocation, coherent Eq. (16c), CSI-state semantics, source-bound
+preparation/calibration, raw curve validation,
 paired seeds, checkpoint/RNG restoration, holdout provenance, and delivery
 hashes. It also covers both noise mappings, both Equation 30 targets, both
 transfer schedules, both WFB replacements, both DDPG comparator CSI readings,

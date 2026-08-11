@@ -6,6 +6,7 @@ import pytest
 
 from ambiguity_hypotheses import (
     PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+    PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
 )
 from channel_model import ChannelSet, plos
 from config import cfg
@@ -57,6 +58,20 @@ def test_los_symbol_role_hypotheses_are_explicit_and_exact():
         )
         assert mapped == pytest.approx(expected_mapped)
         assert abs(literal - mapped) > 0.1
+    finally:
+        cfg.los_probability_hypothesis_id = saved
+
+
+def test_primary_los_branch_matches_printed_eq6_and_high_los_text():
+    saved = cfg.los_probability_hypothesis_id
+    try:
+        cfg.los_probability_hypothesis_id = (
+            PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID
+        )
+        assert PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID == (
+            "paper_eq6_literal_roles"
+        )
+        assert plos(20.0) > 0.99
     finally:
         cfg.los_probability_hypothesis_id = saved
 
@@ -168,7 +183,7 @@ class _SeedObserved(RuntimeError):
     pass
 
 
-def test_episode_block_coherence_reuses_the_observed_channel_seed():
+def test_action_is_evaluated_on_the_channel_seed_exposed_in_its_state():
     saved = cfg.channel_coherence_hypothesis_id
     cfg.channel_coherence_hypothesis_id = (
         PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID
@@ -198,6 +213,37 @@ def test_environment_checkpoint_binds_channel_coherence_identity():
     )
     state = environment.checkpoint_state()
     assert state["episode_channel_seed"] == environment._episode_channel_seed
-    state["channel_coherence_hypothesis_id"] = "independent_slot_fading"
+    state["channel_coherence_hypothesis_id"] = "episode_block_fading"
     with pytest.raises(ValueError, match="channel-coherence"):
         environment.restore_checkpoint_state(state)
+
+
+def test_statistical_csi_state_omits_instantaneous_channel_coefficients():
+    perfect = HRISUAVISACEnv(
+        sigma2_scee=0.0, seed=406, sensing_rate_min=0.0
+    )
+    statistical = HRISUAVISACEnv(
+        sigma2_scee=cfg.rho_nmse, seed=406, sensing_rate_min=0.0
+    )
+    channel_features = 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
+
+    assert perfect.observe_instantaneous_csi is True
+    assert statistical.observe_instantaneous_csi is False
+    assert perfect.state_dim - statistical.state_dim == channel_features
+    assert perfect.reset().shape == (perfect.state_dim,)
+    assert statistical.reset().shape == (statistical.state_dim,)
+
+
+def test_partial_csi_explicitly_retains_masked_channel_observation_shape():
+    partial = HRISUAVISACEnv(
+        sigma2_scee=cfg.rho_nmse,
+        seed=407,
+        sensing_rate_min=0.0,
+        csi_observation_fraction=0.5,
+        observe_instantaneous_csi=True,
+    )
+    assert partial.observe_instantaneous_csi is True
+    assert partial.reset().shape == (partial.state_dim,)
+    assert 0 < np.count_nonzero(partial.csi_observation_mask) < (
+        partial.csi_observation_mask.size
+    )

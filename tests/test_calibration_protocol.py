@@ -153,9 +153,13 @@ class CalibrationProtocolTests(unittest.TestCase):
             "selection": {},
         })
         seen_sigma2 = []
+        seen_systems = []
 
         def fake_run_ao(*args, **kwargs):
             seen_sigma2.append(float(kwargs["sigma2"]))
+            seen_systems.append(
+                (cfg.M, cfg.N, cfg.U, cfg.K, cfg.L, cfg.La, cfg.Lp)
+            )
             return {"sum_rate": 7.0, "is_feasible": True}
 
         with patch("ao_optimizer.run_ao", side_effect=fake_run_ao):
@@ -169,6 +173,7 @@ class CalibrationProtocolTests(unittest.TestCase):
         self.assertEqual(len(seen_sigma2), 10)
         self.assertTrue(all(value == 0.0 for value in seen_sigma2[:5]))
         self.assertTrue(all(value > 0.0 for value in seen_sigma2[5:]))
+        self.assertEqual(set(seen_systems), {(4, 2, 3, 3, 20, 10, 10)})
 
     def test_ao_predictor_rejects_infeasible_solver_result(self):
         profile = profile_from_mapping({

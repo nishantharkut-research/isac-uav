@@ -297,11 +297,13 @@ def test_partial_csi_masks_only_the_agent_observation_not_physical_reward():
     objective = ObjectiveSpec.paper(target_rate_min=0.0)
     full = HRISUAVISACEnv(
         sigma2_scee=cfg.rho_nmse, seed=920, csi_observation_fraction=1.0,
+        observe_instantaneous_csi=True,
         objective_spec=objective,
     )
     partial = HRISUAVISACEnv(
         sigma2_scee=cfg.rho_nmse, seed=920,
         csi_observation_fraction=cfg.partial_csi_fraction,
+        observe_instantaneous_csi=True,
         objective_spec=objective,
     )
     state_full = full.reset()
@@ -529,7 +531,7 @@ def test_fig6_uses_configured_training_and_ao_budgets():
     assert "TrainingRegistry" in source
     assert "get_or_train" in source
     assert "fix_uav=False" in source
-    assert "_temporary_system_configuration" in source
+    assert "temporary_system_configuration" in source
     assert "cfg.L   = 20" not in source
 
 

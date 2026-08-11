@@ -663,7 +663,13 @@ def validate_extension_result(
             user_rate_min=user_floor,
             target_rate_min=target_floor,
         )
+        joint_gain = joint - (baseline_comm + baseline_sensing)
+        joint_gain_stats = _summary(joint_gain)
+        checks["positive_paired_joint_gain"] = _check(
+            joint_gain_stats["ci95_low"] > 0.0
+        )
         statistics["joint_rate"] = _summary(joint)
+        statistics["paired_joint_gain"] = joint_gain_stats
     elif mode == "normalized_pareto":
         objective_values = _seed_values(
             extension.get("objective_seed_values", []),
@@ -672,7 +678,15 @@ def validate_extension_result(
         checks["normalized_pareto_metrics"] = _check(
             len(objective_values) == len(extension_comm)
         )
+        objective_gain = objective_values - 1.0
+        objective_gain_stats = _summary(objective_gain)
+        checks["positive_normalized_pareto_gain"] = _check(
+            objective_gain_stats["ci95_low"] > 0.0
+        )
         statistics["normalized_pareto_objective"] = _summary(objective_values)
+        statistics["normalized_pareto_gain_over_baseline"] = (
+            objective_gain_stats
+        )
     else:
         checks["recognized_extension_mode"] = _check(False)
     return {

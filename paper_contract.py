@@ -7,6 +7,24 @@ DRL environment and AO baseline cannot silently optimize different objectives.
 import numpy as np
 
 
+FIGURE_6_SYSTEM_CONFIGURATION = {
+    "M": 4,
+    "N": 2,
+    "U": 3,
+    "K": 3,
+    "L": 20,
+    "La": 10,
+    "Lp": 10,
+}
+
+CALIBRATION_SOLVER_SCOPE = "scipy_ao_surrogate_not_author_algorithm3"
+
+
+def communication_sum_rate(rate_u) -> float:
+    """Return the communication objective in paper Eq. (16)."""
+    return float(np.sum(rate_u))
+
+
 def joint_sum_rate(rate_u, rate_k) -> float:
     """Return the paper objective value from Eq. (16): sum_u R_u.
 
@@ -14,7 +32,7 @@ def joint_sum_rate(rate_u, rate_k) -> float:
     objective; they enter through the sensing-rate floor constraint.
     The historical function name is kept to avoid breaking older scripts.
     """
-    return float(np.sum(rate_u))
+    return communication_sum_rate(rate_u)
 
 
 def sensing_rate_floor_penalty(rate_k, r_k_min: float) -> float:
@@ -55,19 +73,22 @@ def normalized_constraint_violation(excess: float, limit: float) -> float:
 
 
 def cascade_power_16c(ch, theta) -> float:
-    """Worst-user sum of per-element cascade powers in Eq. (16c)."""
+    """Worst-user coherent passive-cascade power in paper Eq. (16c)."""
     theta = np.asarray(theta, dtype=complex)
     return max(
-        float(sum(
-            np.linalg.norm(
+        float(np.linalg.norm(sum(
+            (
                 np.outer(
                     ch.H_ru_hat[u][:, j] * theta[j],
                     ch.G_brj_hat[j, :],
-                ),
-                "fro",
-            ) ** 2
-            for j in range(theta.size)
-        ))
+                )
+                for j in range(theta.size)
+            ),
+            start=np.zeros(
+                (ch.H_ru_hat[u].shape[0], ch.G_brj_hat.shape[1]),
+                dtype=complex,
+            ),
+        ), "fro") ** 2)
         for u in range(len(ch.H_ru_hat))
     )
 

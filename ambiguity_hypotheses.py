@@ -77,7 +77,7 @@ PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID = "constant_upsilon"
 PRIMARY_WFB_HYPOTHESIS_ID = "adaptive_matched_filter_no_capon"
 PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID = "fair_pcsi_comparator"
 PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID = "paper_eq6_literal_roles"
-PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID = "episode_block_fading"
+PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID = "independent_slot_fading"
 PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID = (
     "paper_eq12_eq14_literal_cross_channels"
 )
@@ -202,8 +202,9 @@ LOS_PROBABILITY_HYPOTHESES = MappingProxyType({
         role="primary",
         formula="1/(1+b_env*exp(-a_env*(elevation-b_env)))",
         rationale=(
-            "Evaluate Eq. (6) exactly as printed while retaining the commonly "
-            "used urban constants as an explicit omitted-parameter assumption."
+            "Follow Eq. (6) as printed. With the declared urban constants this "
+            "also matches the paper's stated high-LoS/free-space assumption "
+            "for UAV-ground communication links."
         ),
     ),
     "al_hourani_standard_mapped_roles": LoSProbabilityHypothesis(
@@ -211,31 +212,33 @@ LOS_PROBABILITY_HYPOTHESES = MappingProxyType({
         role="sensitivity",
         formula="1/(1+a_env*exp(-b_env*(elevation-a_env)))",
         rationale=(
-            "Interpret the paper's symbols as a role renaming of the standard "
-            "Al-Hourani urban formula: paper a=b_env and paper b=a_env."
+            "Map the conventional Al-Hourani constant roles into the paper's "
+            "reversed symbols. This external-convention interpretation is "
+            "reported as a non-selecting sensitivity."
         ),
     ),
 })
 
 
 CHANNEL_COHERENCE_HYPOTHESES = MappingProxyType({
+    "episode_block_fading": ChannelCoherenceHypothesis(
+        identifier="episode_block_fading",
+        role="sensitivity",
+        resample_each_slot=False,
+        rationale=(
+            "Hold one latent realization for an episode as a block-fading "
+            "sensitivity; the printed Algorithm 1 samples inside the time-step "
+            "loop instead."
+        ),
+    ),
     PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID: ChannelCoherenceHypothesis(
         identifier=PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
         role="primary",
-        resample_each_slot=False,
-        rationale=(
-            "Keep one latent small-scale realization within an episode so the "
-            "instantaneous CSI in s_t is relevant to a_t; geometry and target "
-            "Doppler still evolve each slot."
-        ),
-    ),
-    "independent_slot_fading": ChannelCoherenceHypothesis(
-        identifier="independent_slot_fading",
-        role="sensitivity",
         resample_each_slot=True,
         rationale=(
-            "Resample independent small-scale fading each slot as a conservative "
-            "fast-fading sensitivity, despite weakening state-action observability."
+            "Follow Algorithm 1 by sampling a realization for every time-step. "
+            "The environment exposes that realization before its action is "
+            "evaluated, preserving instantaneous-CSI observability."
         ),
     ),
 })
