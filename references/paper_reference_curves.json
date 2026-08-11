@@ -1,0 +1,139 @@
+{
+  "schema_version": 1,
+  "paper": "Saikia et al., IEEE Transactions on Communications, vol. 73, no. 9, 2025",
+  "calibration_figures": [6],
+  "holdout_figures": [4, 5, 7, 8, 9, 13, 14],
+  "figures": {
+    "4": {
+      "kind": "digitized_reference",
+      "source_page": 11,
+      "role": "holdout",
+      "x_axis": {"label": "Number of Episodes", "units": "episodes"},
+      "y_axis": {"label": "Rewards", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of plotted marker centers from the rendered journal page",
+      "uncertainty": {"absolute_y": 0.08},
+      "x": [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200, 1300, 1400],
+      "curves": {
+        "DTL-pCSI": [8.20, 8.32, 8.47, 8.58, 8.80, 9.00, 9.23, 9.36, 9.50, 9.50, 9.50, 9.50, 9.50, 9.50, 9.50],
+        "DTL-WFB": [6.35, 6.62, 7.10, 7.45, 7.85, 8.18, 8.52, 8.75, 8.90, 8.96, 8.96, 8.96, 8.96, 8.96, 8.96],
+        "DTL-iCSI": [7.10, 7.22, 7.40, 7.60, 7.80, 7.92, 8.10, 8.22, 8.40, 8.40, 8.40, 8.40, 8.40, 8.40, 8.40],
+        "DDPG": [5.10, 5.20, 5.36, 5.55, 5.78, 5.86, 6.05, 6.25, 6.32, 6.42, 6.42, 6.42, 6.42, 6.42, 6.42]
+      }
+    },
+    "5": {
+      "kind": "digitized_reference",
+      "source_page": 11,
+      "role": "holdout",
+      "x_axis": {"label": "Number of iterations", "units": "iterations"},
+      "y_axis": {"label": "Communication rate", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of the three plotted trajectories from the rendered journal page; integer-iteration values between visible bends are approximate",
+      "uncertainty": {"absolute_y": 0.15},
+      "x": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+      "curves": {
+        "L=30": [1.10, 3.70, 5.05, 6.55, 7.25, 7.55, 7.65, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68, 7.68],
+        "L=20": [0.88, 3.42, 4.72, 6.25, 6.98, 7.28, 7.38, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40, 7.40],
+        "L=10": [0.62, 3.02, 4.32, 5.90, 6.65, 6.92, 7.03, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06, 7.06]
+      }
+    },
+    "6": {
+      "kind": "digitized_reference",
+      "source_page": 11,
+      "role": "calibration",
+      "x_axis": {"label": "ISAC transmitter power", "units": "paper-reported dB label (reference unspecified)"},
+      "y_axis": {"label": "Communication rate", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of plotted marker centers from the rendered journal page",
+      "uncertainty": {"absolute_y": 0.08},
+      "x": [10, 15, 20, 25, 30],
+      "curves": {
+        "DTL-pCSI": [7.50, 8.00, 8.45, 9.00, 9.68],
+        "DDPG": [7.25, 7.75, 8.15, 8.60, 8.95],
+        "AO-pCSI": [7.15, 7.65, 8.15, 8.70, 9.20],
+        "DTL-iCSI": [6.85, 7.35, 7.80, 8.25, 8.65],
+        "AO-iCSI": [6.65, 7.10, 7.55, 7.90, 8.15],
+        "DTL-ParCSI": [6.45, 7.10, 7.55, 8.10, 8.50]
+      }
+    },
+    "7": {
+      "kind": "digitized_reference",
+      "source_page": 12,
+      "role": "holdout",
+      "x_axis": {"label": "Number of HRIS elements", "units": "elements"},
+      "y_axis": {"label": "Communication rate", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of plotted marker centers from the rendered journal page",
+      "uncertainty": {"absolute_y": 0.08},
+      "x": [20, 30, 40, 50, 60],
+      "curves": {
+        "HRIS-pCSI": [8.00, 8.50, 9.00, 9.50, 10.00],
+        "HRIS-iCSI": [7.00, 7.50, 8.00, 8.50, 9.00],
+        "HRIS-ParCSI": [6.65, 7.10, 7.60, 8.10, 8.60],
+        "Passive RIS": [5.30, 5.90, 6.50, 6.90, 7.20],
+        "Random Phase": [5.00, 5.30, 5.70, 6.30, 6.90],
+        "No-RIS": [4.10, 4.10, 4.10, 4.10, 4.10]
+      }
+    },
+    "8": {
+      "kind": "digitized_reference",
+      "source_page": 12,
+      "role": "holdout",
+      "x_axis": {"label": "SCEE normalized mean squared error", "units": "dimensionless"},
+      "y_axis": {"label": "Communication rate", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of plotted marker centers from the rendered journal page",
+      "uncertainty": {"absolute_y": 0.08},
+      "x": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+      "curves": {
+        "HRIS-L40": [9.00, 8.40, 7.60, 6.80, 6.00, 5.20],
+        "HRIS-L20": [8.50, 7.80, 7.00, 6.20, 5.50, 4.70],
+        "Passive-L40": [6.50, 5.80, 5.20, 4.60, 4.00, 3.40],
+        "Passive-L20": [6.00, 5.40, 4.80, 4.20, 3.60, 3.00]
+      }
+    },
+    "9": {
+      "kind": "digitized_reference",
+      "source_page": 12,
+      "role": "holdout",
+      "x_axis": {"label": "Number of HRIS elements", "units": "elements"},
+      "y_axis": {"label": "Communication rate", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of bar tops from the rendered journal page",
+      "uncertainty": {"absolute_y": 0.10},
+      "x": [40, 30],
+      "curves": {
+        "nu=0.1": [9.60, 8.90],
+        "nu=0.3": [7.90, 7.20],
+        "nu=0.5": [6.10, 5.50]
+      }
+    },
+    "13": {
+      "kind": "digitized_reference",
+      "source_page": 13,
+      "role": "holdout",
+      "x_axis": {"label": "Minimum target SINR delta", "units": "linear SINR"},
+      "y_axis": {"label": "Communication and sensing rates", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of plotted marker centers from the rendered journal page; target-rate curves use the right axis",
+      "uncertainty": {"absolute_y": 0.06},
+      "x": [0, 5, 10, 15, 20],
+      "curves": {
+        "Ru-L40": [9.00, 8.72, 8.42, 7.92, 7.35],
+        "Ru-L30": [8.52, 8.30, 8.00, 7.65, 7.22],
+        "Ru-L20": [8.02, 7.92, 7.76, 7.44, 7.08],
+        "Rk-L30": [7.60, 7.85, 8.15, 8.33, 8.40],
+        "Rk-L20": [7.55, 7.73, 7.94, 8.14, 8.27]
+      }
+    },
+    "14": {
+      "kind": "digitized_reference",
+      "source_page": 13,
+      "role": "holdout",
+      "x_axis": {"label": "Minimum sensing-only SINR", "units": "dB"},
+      "y_axis": {"label": "Communication rate", "units": "bits/s/Hz"},
+      "digitization_method": "visual reading of plotted marker centers from the rendered journal page",
+      "uncertainty": {"absolute_y": 0.08},
+      "x": [0, 5, 10, 15, 20],
+      "curves": {
+        "DTL, L=30": [8.80, 8.50, 8.20, 7.90, 7.40],
+        "DTL, L=20": [8.40, 8.20, 7.90, 7.70, 7.25],
+        "DDPG, L=30": [7.50, 7.30, 7.05, 6.70, 6.35],
+        "DDPG, L=20": [7.30, 7.00, 6.70, 6.40, 6.00]
+      }
+    }
+  }
+}

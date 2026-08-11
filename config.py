@@ -1,0 +1,249 @@
+"""
+config.py — System, channel, and DRL hyper-parameters.
+Matches Tables III & IV of:
+  Saikia et al., "Hybrid-RIS Empowered UAV-Assisted ISAC Systems:
+  Transfer Learning-Based DRL," IEEE Trans. Commun., 2025.
+"""
+import numpy as np
+from physical_hypotheses import (
+    dbm_to_watts,
+    dbw_to_watts,  # re-exported for compatibility with existing scripts
+    get_power_hypothesis,
+    watts_to_dbm,
+    watts_to_dbw,
+)
+from ambiguity_hypotheses import (
+    PRIMARY_NOISE_HYPOTHESIS_ID,
+    PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID,
+    PRIMARY_TRANSFER_UPDATE_HYPOTHESIS_ID,
+    PRIMARY_WFB_HYPOTHESIS_ID,
+    PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+    get_noise_hypothesis,
+    get_wfb_hypothesis,
+)
+
+__all__ = [
+    "Config", "cfg", "dbm_to_watts", "dbw_to_watts", "watts_to_dbm",
+    "watts_to_dbw",
+]
+
+
+class Config:
+    # The paper does not publish random seeds. This fixed seed is a documented
+    # reproduction assumption used by NumPy, Python, PyTorch, and figure scenes.
+    random_seed = 2025
+
+    # Table III: simulation parameters. Keep these as the paper baseline.
+    M   = 4          # ISAC BS transmit antennas
+    N   = 2          # UE / TE receive antennas per node
+    U   = 3          # Number of communication users
+    K   = 3          # Number of sensing targets
+    L   = 40         # Total HRIS reflecting elements  (La + Lp)
+    La  = 20         # Active elements  (with signal amplification)
+    Lp  = 20         # Passive elements  (unit-modulus phase shifts)
+
+    # UPA sub-array dimensions  (La = Lax*Lay,  Lp = Lpx*Lpy)
+    Lax, Lay = 4, 5
+    Lpx, Lpy = 4, 5
+
+    # Noise powers:  dBm → Watts
+    # Table III prints sigma_k^2 but describes it as active-element noise. Keep
+    # target-receiver and active-amplifier noise separate so Eqs. (12) and (14)
+    # use the intended physical term.
+    noise_hypothesis_id = PRIMARY_NOISE_HYPOTHESIS_ID
+    _noise_hypothesis = get_noise_hypothesis(noise_hypothesis_id)
+    sigma2_u_dBm = _noise_hypothesis.ue_receiver_dbm
+    sigma2_k_dBm = _noise_hypothesis.target_receiver_dbm
+    sigma2_a_dBm = _noise_hypothesis.active_amplifier_dbm
+    sigma2_u = dbm_to_watts(sigma2_u_dBm)
+    sigma2_k = dbm_to_watts(sigma2_k_dBm)
+    sigma2_a = dbm_to_watts(sigma2_a_dBm)
+
+    # The paper labels P_T only as dB. dBm is the primary hypothesis; dBW is
+    # retained as a separately identified sensitivity run.
+    power_hypothesis_id = "paper_db_as_dbm"
+    _power_hypothesis = get_power_hypothesis(power_hypothesis_id)
+    PT_dB = 10.0
+    PT_reference = "1 mW"
+    PT_display_unit = _power_hypothesis.display_unit
+    PT = _power_hypothesis.to_watts(PT_dB)
+    PT_dBm = watts_to_dbm(PT)
+    PT_dBW = watts_to_dbw(PT)
+    power_hypothesis_metadata = _power_hypothesis.as_dict(PT_dB)
+
+    @property
+    def sigma2_qa(self):
+        """Deprecated compatibility name for active-amplifier noise only."""
+        return self.sigma2_a
+
+    @sigma2_qa.setter
+    def sigma2_qa(self, value):
+        self.sigma2_a = float(value)
+
+    @property
+    def sigma2_qa_dBm(self):
+        """Deprecated compatibility name for sigma2_a_dBm."""
+        return self.sigma2_a_dBm
+
+    @sigma2_qa_dBm.setter
+    def sigma2_qa_dBm(self, value):
+        self.sigma2_a_dBm = float(value)
+
+    # Active element constraints
+    alpha_max_dB = 10        # maximum amplification (dB)
+    alpha_max    = 10**(alpha_max_dB / 20)   # linear amplitude
+
+    # Passive-element power threshold  Ψ_max  (Eq. 16c)
+    Psi_max = 1.0
+
+    # Minimum sensing rate threshold  R_min  (Eq. 16e)
+    R_min   = 0.5            # bits/s/Hz  per sensing target
+    # The extension PNG adds a separate UE floor but does not provide its
+    # numeric value.  Equal 0.5 floors are the disclosed primary assumption.
+    R_u_min = 0.5            # bits/s/Hz per UE, extension only
+    # Aggregate active-HRIS transmit-power bound P_ai <= P_a_max (Eq. 16d).
+    # The paper states the constraint but does not tabulate a numeric value.
+    P_a_max = PT
+    I_a_min = 0.0            # deprecated compatibility alias; not used by Eq. 16d
+
+    # ── Channel model ─────────────────────────────────────────────────────────
+    # The paper does not report these four physical constants. They are
+    # explicit reproduction assumptions, not values from Tables III/IV.
+    fc          = 3e9        # carrier frequency assumption (Hz)
+    wavelength  = 3e8 / fc  # λ (m)
+    d_spacing   = 0.5        # standard half-wavelength spacing assumption
+    omega_0     = 1e-3       # standard -30 dB power gain at d0=1 m assumption
+
+    # Communication / sensing power split.
+    comm_power_frac = 0.8     # unreported initialization; feasibility search refines it
+
+    rho_br = 10.0            # Rician K-factor  BS → HRIS
+    rho_rt = 5.0             # Rician K-factor  HRIS → target / user
+
+    # Urban LoS probability  P_LoS(φ) = 1/(1+a·exp(−b(φ−a)))  ITU-R urban
+    # a=9.61, b=0.16 for dense urban (Al-Hourani et al., GLOBECOM 2014)
+    a_env  = 9.61
+    b_env  = 0.16
+    # Endpoint parameterization of the paper's Eq. (5):
+    #   zeta(phi) = P_LoS(phi) * zeta_e + zeta_0.
+    # Here zeta_0=zeta_nlos and the paper's zeta_e=(zeta_los-zeta_nlos).
+    # Storing the physical endpoints avoids treating the paper's zeta_e as a
+    # positive LoS exponent, which would reverse the elevation dependence.
+    zeta_los  = 2.0          # P_LoS=1 endpoint (assumption)
+    zeta_nlos = 3.5          # P_LoS=0 endpoint / paper zeta_0 (assumption)
+
+    # Statistical Channel Estimation Error (SCEE)
+    # rho_nmse is the paper's normalized ratio, never an absolute noise power.
+    # In channel_model.py the conditional Gaussian construction uses error
+    # variance rho/(1+rho) times true-channel power. This makes the paper's
+    # ratio E|H-H_hat|^2 / E|H_hat|^2 equal rho.
+    rho_nmse    = 0.1        # Fig. 8 baseline-point assumption
+    # The paper does not define which coefficients are available for ParCSI.
+    # The reproduction therefore exposes a fixed fraction of the iCSI channel
+    # features to the agent. It does not tune a second NMSE to force ordering.
+    partial_csi_fraction = 0.5
+    rho_partial = rho_nmse  # compatibility alias; ParCSI uses observation masking
+    sigma2_brj  = rho_nmse   # kept for compatibility; used as ratio, NOT watts
+    sigma2_bri  = rho_nmse
+    sigma2_ruj  = rho_nmse
+    sigma2_rti  = rho_nmse
+    sigma2_bu   = rho_nmse
+    sigma2_bk   = rho_nmse
+
+    # ── Geometry ──────────────────────────────────────────────────────────────
+    # Fig. 10 visibly uses a 300 m x 200 m horizontal service area. These
+    # limits are figure-derived because Tables III/IV do not list them.
+    x_min, x_max = 0.0, 300.0    # (m)
+    y_min, y_max = 0.0, 200.0
+    z_UAV        = 50.0           # fixed UAV altitude (m)
+    BS_pos       = np.array([0.0, 0.0, 0.0])
+
+    # Page 10 states that UEs are selected from a 100 m x 100 m region. Its
+    # origin is not reported, so [0, 100] x [0, 100] is an explicit baseline
+    # assumption kept separate from the larger Fig. 10 UAV/detection domain.
+    ue_x_min, ue_x_max = 0.0, 100.0
+    ue_y_min, ue_y_max = 0.0, 100.0
+
+    # The paper states that the sensing targets have low mobility but does not
+    # publish a speed. This explicit assumption is used by the seeded target
+    # motion model and must not be tuned against any figure.
+    target_speed_mps = 1.0
+    fig10_plot_interval = 20  # 301 slots -> 16 displayed trajectory samples
+
+    # ── UAV mobility ──────────────────────────────────────────────────────────
+    v_max   = 10.0    # m/s maximum speed
+    delta_T = 0.1     # s per time slot
+    N_slots = 300     # time horizon per episode (Table IV)
+    D_max   = v_max * delta_T    # maximum displacement per slot
+
+    # ── Table IV: DRL Configuration ───────────────────────────────────────────
+    E_episodes  = 1000          # episodes
+    # Fig. 4 visibly plots episodes 0..1400 despite Table IV reporting 1000.
+    # Keep the table value for sweeps and expose the figure protocol separately.
+    fig4_episodes = 1500
+    fig4_plot_interval = 100
+    T_steps     = 300           # time steps per episode
+    B_batch     = 32            # replay mini-batch size
+    lr_actor    = 1e-3          # actor learning rate
+    lr_critic   = 1e-3          # critic learning rate
+    gamma       = 0.9           # discount factor
+    tau         = 0.01          # soft-update rate  τ (Eq. 28-29)
+    replay_size = 10_000        # replay buffer size W
+    checkpoint_every = 10       # completed episodes; set to 1 for minimal loss
+
+    # Exploration noise
+    noise_std    = 0.3          # unreported Gaussian exploration assumption
+    noise_decay  = 0.999        # unreported per-episode decay assumption
+
+    # Transfer learning  (Eq. 30)
+    # Eq. (30) does not publish a complete Bellman update. The executable
+    # interpretation is fingerprinted so checkpoints cannot mix alternatives.
+    dtl_transfer_mode = PRIMARY_TRANSFER_UPDATE_HYPOTHESIS_ID
+    dtl_transfer_schedule_id = PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID
+    upsilon_0    = 0.7          # initial transfer weight
+    upsilon_min  = 0.1          # floor for transfer weight
+    upsilon_decay = 0.001       # per-episode decay
+
+    # DTL-WFB removes Capon, but the journal omits the replacement filter.
+    wfb_hypothesis_id = PRIMARY_WFB_HYPOTHESIS_ID
+    wfb_beamformer_mode = get_wfb_hypothesis(
+        wfb_hypothesis_id
+    ).beamformer_mode
+    # The standalone DDPG curve is compared to DTL-pCSI under the same CSI.
+    # The omitted iCSI interpretation is an explicit sensitivity branch.
+    ddpg_comparator_csi_hypothesis_id = (
+        PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID
+    )
+
+    # Section IV requires a related but different source/target task. The paper
+    # does not publish its scenes, so distinct deterministic scene seeds are an
+    # explicit reproduction assumption.
+    source_scene_seed = 2025
+    target_scene_seed = 2026
+
+    # AO baseline
+    ao_max_iter  = 20
+    ao_tol       = 1e-4
+    sca_max_iter = 15
+    fig6_ao_iter = 10
+    fig6_train_episodes = 1000
+def _factor_upa(n: int):
+    """
+    Return (Lx, Ly) such that Lx * Ly == n EXACTLY.
+    Finds the most-square factorisation so the UPA is as square as possible.
+
+    Examples
+    --------
+    10  → (2, 5)   20 → (4, 5)   15 → (3, 5)   30 → (5, 6)
+    """
+    best = (1, n)
+    for lx in range(2, int(n ** 0.5) + 1):
+        if n % lx == 0:
+            best = (lx, n // lx)
+    return best   # (smaller_factor, larger_factor)
+
+
+# ── Shared singleton ─────────────────────────────────────────────────────────
+# Import THIS object in every module:  from config import cfg
+# Never do  cfg = Config()  in other files — that breaks L-sweep patching.
+cfg = Config()

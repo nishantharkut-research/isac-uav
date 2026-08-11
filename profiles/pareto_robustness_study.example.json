@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "kind": "ba_pcdtl_robustness_study",
+  "common": {
+    "research_seeds": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "validation_scene_seeds": [101, 102, 103, 104, 105],
+    "test_scene_seeds": [201, 202, 203, 204, 205, 206, 207, 208, 209, 210],
+    "episodes": 1500,
+    "evaluation_episodes": 5,
+    "checkpoint_every": 10,
+    "comparison_level": "primary"
+  },
+  "scenarios": [
+    {
+      "id": "primary",
+      "profile": "REPLACE_WITH_PRIMARY_CALIBRATED_PROFILE.json",
+      "baseline_summary": "REPLACE_WITH_PRIMARY_BASELINE/baseline_summary.json",
+      "baseline_validation": "REPLACE_WITH_PRIMARY_BASELINE/baseline_validation.json",
+      "output": "REPLACE_WITH_OUTPUT_ROOT/primary",
+      "extra_args": []
+    },
+    {
+      "id": "source_scee_nmse",
+      "profile": "REPLACE_WITH_NMSE_PROFILE.json",
+      "baseline_summary": "REPLACE_WITH_NMSE_BASELINE/baseline_summary.json",
+      "baseline_validation": "REPLACE_WITH_NMSE_BASELINE/baseline_validation.json",
+      "output": "REPLACE_WITH_OUTPUT_ROOT/source_scee_nmse",
+      "extra_args": []
+    },
+    {
+      "id": "target_mobility",
+      "profile": "REPLACE_WITH_MOBILITY_PROFILE.json",
+      "baseline_summary": "REPLACE_WITH_MOBILITY_BASELINE/baseline_summary.json",
+      "baseline_validation": "REPLACE_WITH_MOBILITY_BASELINE/baseline_validation.json",
+      "output": "REPLACE_WITH_OUTPUT_ROOT/target_mobility",
+      "extra_args": []
+    },
+    {
+      "id": "carrier_frequency",
+      "profile": "REPLACE_WITH_CARRIER_FREQUENCY_PROFILE.json",
+      "baseline_summary": "REPLACE_WITH_CARRIER_FREQUENCY_BASELINE/baseline_summary.json",
+      "baseline_validation": "REPLACE_WITH_CARRIER_FREQUENCY_BASELINE/baseline_validation.json",
+      "output": "REPLACE_WITH_OUTPUT_ROOT/carrier_frequency",
+      "extra_args": []
+    },
+    {
+      "id": "element_spacing",
+      "profile": "REPLACE_WITH_ELEMENT_SPACING_PROFILE.json",
+      "baseline_summary": "REPLACE_WITH_ELEMENT_SPACING_BASELINE/baseline_summary.json",
+      "baseline_validation": "REPLACE_WITH_ELEMENT_SPACING_BASELINE/baseline_validation.json",
+      "output": "REPLACE_WITH_OUTPUT_ROOT/element_spacing",
+      "extra_args": []
+    },
+    {
+      "id": "extension_user_rate_floor",
+      "profile": "REPLACE_WITH_USER_FLOOR_PROFILE.json",
+      "baseline_summary": "REPLACE_WITH_USER_FLOOR_BASELINE/baseline_summary.json",
+      "baseline_validation": "REPLACE_WITH_USER_FLOOR_BASELINE/baseline_validation.json",
+      "output": "REPLACE_WITH_OUTPUT_ROOT/extension_user_rate_floor",
+      "extra_args": []
+    }
+  ]
+}
