@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Iterable, Mapping
 
 import numpy as np
@@ -45,12 +47,19 @@ class ParetoAnchors:
         self.frozen = False
         self.provenance: dict = {}
 
-    def update_training(self, objective_values) -> None:
+    def update_training(self, objective_values, lower_quantile=0.0,
+                        upper_quantile=1.0) -> None:
         if self.frozen:
             raise RuntimeError("Pareto anchors are frozen and cannot be updated.")
         values = _objective_array(objective_values, "training objective values")
-        batch_ideal = values.max(axis=0)
-        batch_nadir = values.min(axis=0)
+        lower_quantile = float(lower_quantile)
+        upper_quantile = float(upper_quantile)
+        if not 0.0 <= lower_quantile < upper_quantile <= 1.0:
+            raise ValueError(
+                "Pareto anchor quantiles must satisfy 0 <= low < high <= 1."
+            )
+        batch_ideal = np.quantile(values, upper_quantile, axis=0)
+        batch_nadir = np.quantile(values, lower_quantile, axis=0)
         self.ideal = (
             batch_ideal.copy()
             if self.ideal is None
@@ -85,6 +94,14 @@ class ParetoAnchors:
             "frozen": bool(self.frozen),
             "provenance": dict(self.provenance),
         }
+
+    def digest(self) -> str:
+        """Return a canonical identity for checkpoint and run provenance."""
+        encoded = json.dumps(
+            self.state_dict(), sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @classmethod
     def from_state_dict(cls, state: Mapping) -> "ParetoAnchors":

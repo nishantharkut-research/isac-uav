@@ -277,7 +277,9 @@ def test_structural_candidate_generation_is_deterministic_and_bounded():
         assert np.isclose(values["ue_x_max"] - values["ue_x_min"], 100.0)
         assert np.isclose(values["ue_y_max"] - values["ue_y_min"], 100.0)
         assert values["zeta_los"] < values["zeta_nlos"]
-        assert values["P_a_max"] >= cfg.sigma2_qa
+        assert values["R_min"] == 0.5
+        assert values["Psi_max"] == 1.0
+        assert values["P_a_max"] == 10.0
 
 
 def test_constraint_derivation_uses_conservative_extrema_not_rate_level():
@@ -336,6 +338,7 @@ def test_structural_score_does_not_optimize_communication_rate_magnitude():
         "cascade_utilization_median": 0.7,
         "comm_rate_cv": 0.1,
         "sensing_rate_cv": 0.1,
+        "comm_action_response_median": 0.01,
         "raw_scenes": [],
         "errors": [],
     }
@@ -362,6 +365,7 @@ def test_structural_score_rejects_nonfinite_or_broken_power_contracts():
         "cascade_utilization_median": 1.0,
         "comm_rate_cv": np.nan,
         "sensing_rate_cv": 0.0,
+        "comm_action_response_median": 0.01,
         "comm_rate_mean": 1.0,
         "sensing_rate_mean": 1.0,
         "raw_scenes": [],
@@ -388,6 +392,7 @@ def test_structural_acceptance_requires_constraint_and_joint_feasibility():
         "active_feasible_fraction": 1.0,
         "cascade_feasible_fraction": 1.0,
         "joint_feasible_fraction": 1.0,
+        "comm_action_response_median": 0.01,
         "errors": [],
     }
     accepted, reasons = structural_acceptance(passing)
@@ -397,6 +402,11 @@ def test_structural_acceptance_requires_constraint_and_joint_feasibility():
     accepted, reasons = structural_acceptance(failing)
     assert accepted is False
     assert "joint" in " ".join(reasons).lower()
+
+    insensitive = dict(passing, comm_action_response_median=0.0)
+    accepted, reasons = structural_acceptance(insensitive)
+    assert accepted is False
+    assert "policy actions" in " ".join(reasons).lower()
 
 
 def test_tiny_structural_evaluation_is_raw_deterministic_and_training_free():

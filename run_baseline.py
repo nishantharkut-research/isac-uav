@@ -40,6 +40,7 @@ def run(args):
         final_window_mean, make_run_manifest, parse_seeds,
         physical_configuration_fingerprint,
         serializable_training_result,
+        write_immutable_json,
         TRAINING_SEED_PROTOCOL,
         derive_training_seed,
     )
@@ -51,6 +52,7 @@ def run(args):
         train_ddpg,
         train_dtl,
     )
+    from scientific_preflight import run_pretraining_physical_sanity
     from source_integrity import source_tree_digest
 
     seeds = parse_seeds(args.seeds)
@@ -73,16 +75,28 @@ def run(args):
     manifest["training_seed_protocol"] = TRAINING_SEED_PROTOCOL
     manifest["episodes"] = args.episodes
     manifest["evaluation_episodes"] = args.eval_episodes
-    output = ensure_run_directory(args.output, manifest)
-    if args.dry_run:
-        return 0
     if args.episodes <= 0 or args.eval_episodes <= 0 or args.checkpoint_every <= 0:
-        raise ValueError("Episodes, evaluation episodes, and checkpoint interval must be positive.")
+        raise ValueError(
+            "Episodes, evaluation episodes, and checkpoint interval must be "
+            "positive."
+        )
     if args.episodes != cfg.fig4_episodes:
         raise ValueError(
             f"Paper Figure 4 requires exactly {cfg.fig4_episodes} episodes."
         )
-
+    output = ensure_run_directory(args.output, manifest)
+    if args.dry_run:
+        return 0
+    sanity = run_pretraining_physical_sanity()
+    sanity["physical_configuration_fingerprint"] = physics
+    sanity["source_tree_digest"] = manifest["source_tree_digest"]
+    apply_ambiguity_manifest_fields(sanity, cfg)
+    sanity_path = write_immutable_json(
+        output / "pretraining_physical_sanity.json", sanity
+    )
+    manifest["pretraining_physical_sanity"] = sanity_path.name
+    manifest["pretraining_physical_sanity_sha256"] = _file_sha256(sanity_path)
+    atomic_write_json(output / "run_manifest.json", manifest)
     progress_path = output / "baseline_progress.json"
     checkpoint_dir = output / "checkpoints"
     seed_records = []
@@ -209,6 +223,9 @@ def run(args):
         "evaluation_episodes": args.eval_episodes,
         "final_reward_source": "training_communication_rate",
         "training_final_window": training_final_window,
+        "pretraining_physical_sanity_sha256": manifest[
+            "pretraining_physical_sanity_sha256"
+        ],
         "feasibility_rate": min(
             item["feasibility_rate"] for item in all_method_evaluations
         ),

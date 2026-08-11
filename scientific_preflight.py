@@ -16,6 +16,7 @@ PREFLIGHT_STEPS_PER_SEED = 12
 PREFLIGHT_ACTION_MODES = (
     "half_active", "zero_active", "full_active", "random_active"
 )
+PRETRAINING_SANITY_SEEDS = (24_501, 24_502, 24_503)
 
 
 def build_preflight_action(seed, step_index):
@@ -145,5 +146,40 @@ def run_scientific_preflight(output_path, seeds=PREFLIGHT_SEEDS,
         raise RuntimeError(
             "Scientific preflight failed before training. See "
             f"{output_path}."
+        )
+    return report
+
+
+def run_pretraining_physical_sanity(seeds=PRETRAINING_SANITY_SEEDS):
+    """Fail before DRL training if the activated action space is ineffective."""
+    from parameter_identification import (
+        MINIMUM_COMM_ACTION_RESPONSE,
+        evaluate_candidate,
+        structural_acceptance,
+    )
+
+    metrics = evaluate_candidate(None, seeds=seeds)
+    passed, reasons = structural_acceptance(metrics)
+    summary_fields = (
+        "profile_digest", "seeds", "finite_fraction",
+        "power_contract_fraction", "sensing_feasible_fraction",
+        "active_feasible_fraction", "cascade_feasible_fraction",
+        "joint_feasible_fraction", "comm_rate_mean", "sensing_rate_mean",
+        "comm_rate_cv", "sensing_rate_cv",
+        "comm_action_response_median", "comm_action_response_minimum",
+        "sensing_action_response_median", "errors",
+    )
+    report = {
+        "schema_version": 1,
+        "kind": "pretraining_physical_sanity",
+        "method": "deterministic no-training action-response gate",
+        "minimum_comm_action_response": MINIMUM_COMM_ACTION_RESPONSE,
+        "passed": bool(passed),
+        "reasons": list(reasons),
+        **{field: _json_safe(metrics[field]) for field in summary_fields},
+    }
+    if not passed:
+        raise RuntimeError(
+            "Pre-training physical sanity failed: " + "; ".join(reasons)
         )
     return report

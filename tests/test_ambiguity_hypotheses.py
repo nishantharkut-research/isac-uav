@@ -3,6 +3,9 @@ import unittest
 
 from ambiguity_hypotheses import (
     DDPG_COMPARATOR_CSI_HYPOTHESES,
+    CHANNEL_COHERENCE_HYPOTHESES,
+    CROSS_FUNCTION_INTERFERENCE_HYPOTHESES,
+    LOS_PROBABILITY_HYPOTHESES,
     NOISE_HYPOTHESES,
     TRANSFER_SCHEDULE_HYPOTHESES,
     TRANSFER_UPDATE_HYPOTHESES,
@@ -48,6 +51,21 @@ class AmbiguityHypothesisTests(unittest.TestCase):
             set(DDPG_COMPARATOR_CSI_HYPOTHESES),
             {"fair_pcsi_comparator", "icsi_comparator"},
         )
+        self.assertEqual(
+            set(LOS_PROBABILITY_HYPOTHESES),
+            {"paper_eq6_literal_roles", "al_hourani_standard_mapped_roles"},
+        )
+        self.assertEqual(
+            set(CHANNEL_COHERENCE_HYPOTHESES),
+            {"episode_block_fading", "independent_slot_fading"},
+        )
+        self.assertEqual(
+            set(CROSS_FUNCTION_INTERFERENCE_HYPOTHESES),
+            {
+                "paper_eq12_eq14_literal_cross_channels",
+                "receiver_consistent_cross_channels",
+            },
+        )
 
     def test_unknown_noise_hypothesis_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown noise hypothesis"):
@@ -83,7 +101,9 @@ class AmbiguityHypothesisTests(unittest.TestCase):
             set(metadata["axes"]),
             {
                 "noise", "transfer_update", "transfer_schedule", "wfb",
-                "ddpg_comparator_csi",
+                "ddpg_comparator_csi", "los_probability",
+                "channel_coherence",
+                "cross_function_interference",
             },
         )
 

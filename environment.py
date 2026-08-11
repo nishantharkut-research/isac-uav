@@ -157,7 +157,7 @@ class HRISUAVISACEnv:
 
         self._init_scene()
         self.uav_pos = self._uav_start.copy()
-        self._refresh_channel()
+        self._episode_channel_seed = None
         self.reset()
 
     # ── Scene setup ───────────────────────────────────────────────────────────
@@ -199,13 +199,17 @@ class HRISUAVISACEnv:
         """Start a new episode; return initial state.
 
         User/target geometry returns to the seeded initial scene. A fresh
-        channel realization is sampled at reset and after each movement step.
+        latent channel realization is sampled at reset; the declared coherence
+        hypothesis controls whether it is reused after movement steps.
         """
         self.t       = 0
         self.uav_pos = self._uav_start.copy()
         self.pos_tes = [position.copy() for position in self._tes_initial]
         self._tes_velocity = self._tes_velocity_initial.copy()
-        self._refresh_channel()
+        self._episode_channel_seed = int(
+            self._channel_rng.integers(0, 2**32 - 1)
+        )
+        self._refresh_channel(self._episode_channel_seed)
 
         # Canonical initial HRIS configuration (all phases = 0, half-power active).
         self.theta_phase = np.zeros(cfg.Lp)
@@ -267,7 +271,16 @@ class HRISUAVISACEnv:
         )
         self._advance_targets()
         slot_time_s = (self.t + 1) * cfg.delta_T
-        channel_seed = int(self._channel_rng.integers(0, 2**32 - 1))
+        from ambiguity_hypotheses import get_channel_coherence_hypothesis
+
+        coherence = get_channel_coherence_hypothesis(
+            cfg.channel_coherence_hypothesis_id
+        )
+        channel_seed = (
+            int(self._channel_rng.integers(0, 2**32 - 1))
+            if coherence.resample_each_slot
+            else int(self._episode_channel_seed)
+        )
         previous_powers = self.beam_info.get("stream_powers")
         controls, assessment, projection_fraction = self._find_feasible_controls(
             previous_controls,
@@ -339,6 +352,7 @@ class HRISUAVISACEnv:
                          "projection_source", "externally_selected"
                      ),
                      projection_channel_seed=channel_seed,
+                     channel_coherence_hypothesis_id=coherence.identifier,
                      channel_time_s=slot_time_s,
                      uav_bounds_ok=assessment.get(
                          "uav_bounds_ok", trajectory["uav_bounds_ok"]
@@ -722,6 +736,11 @@ class HRISUAVISACEnv:
             "objective_spec": self.objective_spec.as_dict(),
             "allocation_mode": self.allocation_mode,
             "sensing_beamformer_mode": self.sensing_beamformer_mode,
+            "channel_coherence_hypothesis_id":
+                cfg.channel_coherence_hypothesis_id,
+            "cross_function_interference_hypothesis_id":
+                cfg.cross_function_interference_hypothesis_id,
+            "episode_channel_seed": int(self._episode_channel_seed),
             "t": int(self.t),
             "uav_pos": self.uav_pos.copy(),
             "uav_start": self._uav_start.copy(),
@@ -749,6 +768,19 @@ class HRISUAVISACEnv:
         if state.get("sensing_beamformer_mode") != self.sensing_beamformer_mode:
             raise ValueError(
                 "Environment sensing-beamformer mode mismatch in checkpoint."
+            )
+        if state.get("channel_coherence_hypothesis_id") != (
+            cfg.channel_coherence_hypothesis_id
+        ):
+            raise ValueError(
+                "Environment channel-coherence hypothesis mismatch in checkpoint."
+            )
+        if state.get("cross_function_interference_hypothesis_id") != (
+            cfg.cross_function_interference_hypothesis_id
+        ):
+            raise ValueError(
+                "Environment cross-function interference hypothesis mismatch "
+                "in checkpoint."
             )
         if state.get("episode_boundary") is not True:
             raise ValueError("Environment checkpoint is not at an episode boundary.")
@@ -798,6 +830,15 @@ class HRISUAVISACEnv:
         last_sum_rate = float(state["last_sum_rate"])
         if not np.isfinite(last_sum_rate):
             raise ValueError("Invalid environment checkpoint field: last_sum_rate.")
+        episode_channel_seed = state.get("episode_channel_seed")
+        if (
+            isinstance(episode_channel_seed, bool)
+            or not isinstance(episode_channel_seed, (int, np.integer))
+            or not 0 <= int(episode_channel_seed) < 2**32
+        ):
+            raise ValueError(
+                "Invalid environment checkpoint field: episode_channel_seed."
+            )
 
         self.t = t
         self.uav_pos = uav_pos
@@ -811,6 +852,7 @@ class HRISUAVISACEnv:
         self.phi_phase = phi_phase
         self.alpha = alpha
         self.last_sum_rate = last_sum_rate
+        self._episode_channel_seed = int(episode_channel_seed)
         self._rng.bit_generator.state = state["rng_state"]
         self._channel_rng.bit_generator.state = state["channel_rng_state"]
 

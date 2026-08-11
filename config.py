@@ -18,6 +18,9 @@ from ambiguity_hypotheses import (
     PRIMARY_TRANSFER_UPDATE_HYPOTHESIS_ID,
     PRIMARY_WFB_HYPOTHESIS_ID,
     PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+    PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+    PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+    PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
     get_noise_hypothesis,
     get_wfb_hypothesis,
 )
@@ -103,7 +106,7 @@ class Config:
     R_u_min = 0.5            # bits/s/Hz per UE, extension only
     # Aggregate active-HRIS transmit-power bound P_ai <= P_a_max (Eq. 16d).
     # The paper states the constraint but does not tabulate a numeric value.
-    P_a_max = PT
+    P_a_max = 10.0            # W; explicit omitted-parameter assumption
     I_a_min = 0.0            # deprecated compatibility alias; not used by Eq. 16d
 
     # ── Channel model ─────────────────────────────────────────────────────────
@@ -124,6 +127,9 @@ class Config:
     # a=9.61, b=0.16 for dense urban (Al-Hourani et al., GLOBECOM 2014)
     a_env  = 9.61
     b_env  = 0.16
+    # Eq. (6) and the cited urban formula use opposite symbol roles. Both
+    # interpretations are executable; the paper-literal branch is primary.
+    los_probability_hypothesis_id = PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID
     # Endpoint parameterization of the paper's Eq. (5):
     #   zeta(phi) = P_LoS(phi) * zeta_e + zeta_0.
     # Here zeta_0=zeta_nlos and the paper's zeta_e=(zeta_los-zeta_nlos).
@@ -149,6 +155,16 @@ class Config:
     sigma2_rti  = rho_nmse
     sigma2_bu   = rho_nmse
     sigma2_bk   = rho_nmse
+
+    # The pCSI state contains instantaneous channel coefficients. Holding one
+    # latent fading realization per episode keeps those coefficients relevant
+    # to the action while geometry and target Doppler evolve each slot.
+    channel_coherence_hypothesis_id = (
+        PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID
+    )
+    cross_function_interference_hypothesis_id = (
+        PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID
+    )
 
     # ── Geometry ──────────────────────────────────────────────────────────────
     # Fig. 10 visibly uses a 300 m x 200 m horizontal service area. These

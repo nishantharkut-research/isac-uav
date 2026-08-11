@@ -10,6 +10,9 @@ from ambiguity_hypotheses import (
     PRIMARY_TRANSFER_UPDATE_HYPOTHESIS_ID,
     PRIMARY_WFB_HYPOTHESIS_ID,
     PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+    PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+    PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+    PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
 )
 from ambiguity_protocol import build_sensitivity_plan, build_sensitivity_report
 
@@ -62,6 +65,12 @@ def _require_compatible_primary(primary, profile_digest,
         "wfb_hypothesis_id": PRIMARY_WFB_HYPOTHESIS_ID,
         "ddpg_comparator_csi_hypothesis_id":
             PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+        "los_probability_hypothesis_id":
+            PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+        "channel_coherence_hypothesis_id":
+            PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+        "cross_function_interference_hypothesis_id":
+            PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
     }
     mismatches = [
         field for field, value in expected.items()
@@ -156,6 +165,11 @@ def run(args):
             "--wfb-hypothesis", hypotheses["wfb"],
             "--ddpg-comparator-csi-hypothesis",
             hypotheses["ddpg_comparator_csi"],
+            "--los-probability-hypothesis", hypotheses["los_probability"],
+            "--channel-coherence-hypothesis",
+            hypotheses["channel_coherence"],
+            "--cross-function-interference-hypothesis",
+            hypotheses["cross_function_interference"],
             *(["--fresh"] if args.fresh else []),
             *(["--dry-run"] if args.dry_run else []),
         ])

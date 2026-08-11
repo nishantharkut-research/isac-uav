@@ -53,11 +53,24 @@ def ula_steering(M: int, phi_rad: float) -> np.ndarray:
 # ─── Path Loss / LoS ─────────────────────────────────────────────────────────
 
 def plos(elev_deg: float) -> float:
-    """P_LoS(φ) = 1 / (1 + a·exp(−b·(φ − a)))  ITU-R urban (Eq. 6).
-    a=9.61, b=0.16 for dense urban (Al-Hourani et al., GLOBECOM 2014).
+    """Return LoS probability under the locked Eq. (6) interpretation.
+
+    The paper prints ``1/(1+b*exp(-a*(phi-b)))`` but does not tabulate
+    ``a`` or ``b``. The common urban model prints the same functional form
+    with the symbol roles reversed. Both readings are named hypotheses so a
+    reproduction never silently swaps constants to improve a curve.
     """
+    from ambiguity_hypotheses import get_los_probability_hypothesis
+
     a, b = cfg.a_env, cfg.b_env
-    return 1.0 / (1.0 + a * np.exp(-b * (elev_deg - a)))
+    hypothesis = get_los_probability_hypothesis(
+        cfg.los_probability_hypothesis_id
+    )
+    if hypothesis.identifier == "paper_eq6_literal_roles":
+        return 1.0 / (1.0 + b * np.exp(-a * (elev_deg - b)))
+    if hypothesis.identifier == "al_hourani_standard_mapped_roles":
+        return 1.0 / (1.0 + a * np.exp(-b * (elev_deg - a)))
+    raise AssertionError("Unreachable LoS probability hypothesis")
 
 
 def path_loss_exponent(los_probability: float) -> float:

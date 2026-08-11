@@ -182,6 +182,15 @@ def main(argv=None):
         "ddpg_comparator_csi_hypothesis_id": summary[
             "ddpg_comparator_csi_hypothesis_id"
         ],
+        "los_probability_hypothesis_id": summary[
+            "los_probability_hypothesis_id"
+        ],
+        "channel_coherence_hypothesis_id": summary[
+            "channel_coherence_hypothesis_id"
+        ],
+        "cross_function_interference_hypothesis_id": summary[
+            "cross_function_interference_hypothesis_id"
+        ],
         "baseline_summary_sha256": result_payload_digest(summary),
         "paper_reference_sha256": validation["paper_reference_sha256"],
         "seeds": summary["seeds"],

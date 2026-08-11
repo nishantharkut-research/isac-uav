@@ -312,18 +312,22 @@ def _cascade_error_covariance(H_r: np.ndarray, G_br: np.ndarray,
     n_receive = H_r.shape[0]
     identity = np.eye(n_receive, dtype=complex)
     trace_q = max(float(np.trace(Q).real), 0.0)
-    covariance = np.zeros((n_receive, n_receive), dtype=complex)
-    for index, weight in enumerate(weights):
-        h = H_r[:, index]
-        g = G_br[index, :]
-        g_q_g = max(float(np.real(g @ Q @ g.conj())), 0.0)
-        weight_power = abs(weight) ** 2
-        covariance += weight_power * (
-            sigma2_g * trace_q * _outer(h)
-            + sigma2_h * g_q_g * identity
-            + sigma2_g * sigma2_h * trace_q * identity
-        )
-    return covariance
+    weight_power = np.abs(np.asarray(weights, dtype=complex)) ** 2
+    if weight_power.size == 0:
+        return np.zeros((n_receive, n_receive), dtype=complex)
+    weighted_h = H_r * weight_power[np.newaxis, :]
+    receive_covariance = weighted_h @ H_r.conj().T
+    g_q_g = np.real(np.einsum(
+        "lm,mn,ln->l", G_br, Q, G_br.conj(), optimize=True
+    ))
+    isotropic_power = (
+        sigma2_h * float(np.sum(weight_power * np.maximum(g_q_g, 0.0)))
+        + sigma2_g * sigma2_h * trace_q * float(np.sum(weight_power))
+    )
+    return (
+        sigma2_g * trace_q * receive_covariance
+        + isotropic_power * identity
+    )
 
 
 def _logdet_rate(signal_covariance: np.ndarray,
@@ -347,6 +351,11 @@ def _logdet_rate(signal_covariance: np.ndarray,
 
 def _compute_scee_rates(ch, theta, phi, C, T, H_bar_u, H_bar_k):
     """Matrix rates for Eqs. (21), (24), and (25)."""
+    from ambiguity_hypotheses import get_cross_function_interference_hypothesis
+
+    cross_interference = get_cross_function_interference_hypothesis(
+        cfg.cross_function_interference_hypothesis_id
+    )
     identity = np.eye(cfg.N, dtype=complex)
     C_total = C @ C.conj().T
     T_total = T @ T.conj().T
@@ -372,15 +381,23 @@ def _compute_scee_rates(ch, theta, phi, C, T, H_bar_u, H_bar_k):
         desired = Hu @ _outer(C[:, u]) @ Hu.conj().T
         C_interference = C_total - _outer(C[:, u])
         J = Hu @ C_interference @ Hu.conj().T
-        for k in range(cfg.K):
-            Tk = _outer(T[:, k])
-            Hk = H_bar_k[k]
-            J += Hk @ Tk @ Hk.conj().T
-            J += ch.sv_bk[k] * max(float(np.trace(Tk).real), 0.0) * identity
+        if cross_interference.receiver_consistent:
+            J += Hu @ T_total @ Hu.conj().T
+            J += ch.sv_bu[u] * trace_t * identity
             J += _cascade_error_covariance(
-                ch.H_rt_hat[k], ch.G_bri_hat, phi, Tk,
-                ch.sv_bri, ch.sv_rti[k],
+                ch.H_ru_hat[u], ch.G_brj_hat, theta, T_total,
+                ch.sv_brj, ch.sv_ruj[u],
             )
+        else:
+            for k in range(cfg.K):
+                Tk = _outer(T[:, k])
+                Hk = H_bar_k[k]
+                J += Hk @ Tk @ Hk.conj().T
+                J += ch.sv_bk[k] * max(float(np.trace(Tk).real), 0.0) * identity
+                J += _cascade_error_covariance(
+                    ch.H_rt_hat[k], ch.G_bri_hat, phi, Tk,
+                    ch.sv_bri, ch.sv_rti[k],
+                )
         J += ch.sv_bu[u] * trace_c * identity
         J += _cascade_error_covariance(
             ch.H_ru_hat[u], ch.G_brj_hat, theta, C_total,
@@ -395,15 +412,23 @@ def _compute_scee_rates(ch, theta, phi, C, T, H_bar_u, H_bar_k):
         desired = Hk @ _outer(T[:, k]) @ Hk.conj().T
         T_interference = T_total - _outer(T[:, k])
         J = Hk @ T_interference @ Hk.conj().T
-        for u in range(cfg.U):
-            Cu = _outer(C[:, u])
-            Hu = H_bar_u[u]
-            J += Hu @ Cu @ Hu.conj().T
-            J += ch.sv_bu[u] * max(float(np.trace(Cu).real), 0.0) * identity
+        if cross_interference.receiver_consistent:
+            J += Hk @ C_total @ Hk.conj().T
+            J += ch.sv_bk[k] * trace_c * identity
             J += _cascade_error_covariance(
-                ch.H_ru_hat[u], ch.G_brj_hat, theta, Cu,
-                ch.sv_brj, ch.sv_ruj[u],
+                ch.H_rt_hat[k], ch.G_bri_hat, phi, C_total,
+                ch.sv_bri, ch.sv_rti[k],
             )
+        else:
+            for u in range(cfg.U):
+                Cu = _outer(C[:, u])
+                Hu = H_bar_u[u]
+                J += Hu @ Cu @ Hu.conj().T
+                J += ch.sv_bu[u] * max(float(np.trace(Cu).real), 0.0) * identity
+                J += _cascade_error_covariance(
+                    ch.H_ru_hat[u], ch.G_brj_hat, theta, Cu,
+                    ch.sv_brj, ch.sv_ruj[u],
+                )
         J += ch.sv_bk[k] * trace_t * identity
         J += _cascade_error_covariance(
             ch.H_rt_hat[k], ch.G_bri_hat, phi, T_total,
@@ -444,19 +469,14 @@ def compute_rates(ch,
     """
     H_bar_u = ch.composite_ue(theta)
     H_bar_k = ch.composite_te(phi)
-    scee_nmse = getattr(ch, "scee_nmse", None)
-    if scee_nmse is None:
-        variance_terms = (
-            list(getattr(ch, "sv_bu", []))
-            + list(getattr(ch, "sv_bk", []))
-            + list(getattr(ch, "sv_ruj", []))
-            + list(getattr(ch, "sv_rti", []))
-            + [getattr(ch, "sv_brj", 0.0), getattr(ch, "sv_bri", 0.0)]
-        )
-        has_scee = any(float(value) > 0.0 for value in variance_terms)
-    else:
-        has_scee = float(scee_nmse) > 0.0
-    if use_scee_model and has_scee:
+    from ambiguity_hypotheses import get_cross_function_interference_hypothesis
+    cross_interference = get_cross_function_interference_hypothesis(
+        cfg.cross_function_interference_hypothesis_id
+    )
+    # Eqs. (21)/(25) must also be evaluated at zero estimation error. Switching
+    # to the scalar Eqs. (12)-(15) only at rho=0 creates a non-physical jump
+    # because N=2 and the two receiver models have different zero-error limits.
+    if use_scee_model:
         return _compute_scee_rates(
             ch, theta, phi, C, T, H_bar_u, H_bar_k
         )
@@ -477,16 +497,19 @@ def compute_rates(ch,
             ))
         return cfg.sigma2_a * float(np.mean(values))
 
-    # The published formulas use H_k T_k as sensing interference at each UE
-    # and H_u C_u as communication interference at each target.
-    target_beam_powers = [
-        float(np.linalg.norm(H_bar_k[k] @ T[:, k]) ** 2)
-        for k in range(cfg.K)
-    ]
-    comm_beam_powers = [
-        float(np.linalg.norm(H_bar_u[u] @ C[:, u]) ** 2)
-        for u in range(cfg.U)
-    ]
+    # The primary branch follows the published cross-channel terms exactly.
+    # The sensitivity branch applies every waveform to the current receiver.
+    target_beam_powers = None
+    comm_beam_powers = None
+    if not cross_interference.receiver_consistent:
+        target_beam_powers = [
+            float(np.linalg.norm(H_bar_k[k] @ T[:, k]) ** 2)
+            for k in range(cfg.K)
+        ]
+        comm_beam_powers = [
+            float(np.linalg.norm(H_bar_u[u] @ C[:, u]) ** 2)
+            for u in range(cfg.U)
+        ]
 
     rate_u, sinr_u = np.zeros(cfg.U), np.zeros(cfg.U)
     for u in range(cfg.U):
@@ -494,7 +517,11 @@ def compute_rates(ch,
         sig = float(np.linalg.norm(Hu @ C[:, u]) ** 2) + 1e-30
         intf_uu = sum(float(np.linalg.norm(Hu @ C[:, i]) ** 2)
                       for i in range(cfg.U) if i != u)
-        intf_ku = float(np.sum(target_beam_powers))
+        intf_ku = (
+            float(np.sum(np.abs(Hu @ T) ** 2))
+            if cross_interference.receiver_consistent
+            else float(np.sum(target_beam_powers))
+        )
         scee_u = _ju_scee_ue(ch, C_bar, u)
         denom = (intf_uu + intf_ku + active_amplifier_noise()
                  + scee_u + cfg.sigma2_u)
@@ -507,7 +534,11 @@ def compute_rates(ch,
         sig = float(np.linalg.norm(Hk @ T[:, k]) ** 2) + 1e-30
         intf_kk = sum(float(np.linalg.norm(Hk @ T[:, i]) ** 2)
                       for i in range(cfg.K) if i != k)
-        intf_uk = float(np.sum(comm_beam_powers))
+        intf_uk = (
+            float(np.sum(np.abs(Hk @ C) ** 2))
+            if cross_interference.receiver_consistent
+            else float(np.sum(comm_beam_powers))
+        )
         scee_k = _jk_scee_te(ch, T_bar, k)
         denom = (intf_kk + intf_uk + active_amplifier_noise(k)
                  + scee_k + cfg.sigma2_k)
@@ -522,16 +553,13 @@ def sensing_only_sinr(ch, phi: np.ndarray, T: np.ndarray) -> np.ndarray:
     H_bar_k = ch.composite_te(phi)
     values = np.zeros(cfg.K, dtype=float)
     for k, Hk in enumerate(H_bar_k):
-        signal = float(np.linalg.norm(Hk @ T[:, k]) ** 2)
-        interference = sum(
-            float(np.linalg.norm(Hk @ T[:, other]) ** 2)
-            for other in range(cfg.K) if other != k
-        )
-        active_noise = cfg.sigma2_a * sum(
-            abs(phi[i]) ** 2
-            * float(np.linalg.norm(ch.H_rt_hat[k][:, i]) ** 2)
-            for i in range(cfg.La)
-        )
+        beam_powers = np.sum(np.abs(Hk @ T) ** 2, axis=0).real
+        signal = float(beam_powers[k])
+        interference = float(np.sum(beam_powers) - signal)
+        active_noise = cfg.sigma2_a * float(np.sum(
+            np.abs(phi) ** 2
+            * np.sum(np.abs(ch.H_rt_hat[k]) ** 2, axis=0).real
+        ))
         values[k] = signal / (interference + active_noise + cfg.sigma2_k + 1e-15)
     return values
 
@@ -592,5 +620,10 @@ def coherence_corrected_rate(rate_u: np.ndarray, Omega: int) -> np.ndarray:
     R^{(n)}_u = (1 − (2U + L − 1)/Ω) R_u   (Eq. 19)
     Omega : channel training period (number of time slots).
     """
-    overhead_frac = (2 * cfg.U + cfg.L - 1) / max(Omega, 2 * cfg.U + cfg.L)
+    overhead_slots = 2 * cfg.U + cfg.L - 1
+    if isinstance(Omega, bool) or int(Omega) != Omega or Omega < overhead_slots:
+        raise ValueError(
+            f"Omega must be an integer at least {overhead_slots} slots."
+        )
+    overhead_frac = overhead_slots / int(Omega)
     return (1 - overhead_frac) * rate_u

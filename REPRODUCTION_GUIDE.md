@@ -140,6 +140,11 @@ $profile
 
 Do not switch the locked branch after inspecting another result.
 
+Calibration fails instead of writing a selection lock when neither branch has
+the required pCSI/iCSI ordering, monotone power direction, at least half the
+paper's total power response, and normalized curve error at most `0.15`. A
+failure here is a model-identification failure; do not proceed to training.
+
 For an omitted-parameter sensitivity branch, repeat the complete calibration in
 a new empty output directory and fix the value before any simulated curve is
 seen. For example:
@@ -205,6 +210,12 @@ python run_baseline.py `
   --eval-episodes 5 `
   --checkpoint-every 1
 ```
+
+Before the first training checkpoint is created, this command runs a bounded
+no-training physical sanity gate on three deterministic scenes. Every probe
+must be feasible and the median communication response across gain/phase
+actions must be at least `0.005` relative span. A failure prevents an expensive
+run whose action space is effectively flat.
 
 Validate the complete raw baseline:
 
@@ -456,6 +467,7 @@ Each episode-boundary checkpoint stores:
 - vector replay transitions and executed actions;
 - frozen baseline actor and its digest;
 - Pareto anchors and provenance;
+- the canonical Pareto-anchor digest in both agent and run identity;
 - Sobol sequence seed and position;
 - residual/gate/algorithm contract;
 - raw histories;
@@ -528,11 +540,12 @@ python run_ambiguity_sensitivity.py `
   --primary-validation runs\03_baseline\baseline_validation.json
 ```
 
-This base-reproduction ambiguity study executes five isolated alternatives to
-the accepted primary: noise
-mapping, Equation 30 update, transfer schedule, WFB replacement, and DDPG iCSI.
-The report contains paired deltas and no selected winner. The optional
-`--design full_factorial` executes all 32 predeclared combinations.
+This base-reproduction ambiguity study executes eight isolated alternatives to
+the accepted primary: noise mapping, Equation 30 update, transfer schedule, WFB
+replacement, DDPG iCSI, LoS symbol-role mapping, independent slot fading, and
+receiver-consistent cross-function interference. The report contains paired
+deltas and no selected winner. The optional `--design full_factorial` executes
+all 256 predeclared combinations and is substantially more expensive.
 
 ## 17. Legacy Sensitivity Modes
 

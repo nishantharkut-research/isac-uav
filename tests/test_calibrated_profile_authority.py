@@ -84,8 +84,20 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
             "paper_reference_sha256": reference_digest,
             "common_random_seeds": [21000, 21001, 21002, 21003, 21004],
             "candidate_scores": [
-                {"hypothesis_id": "paper_db_as_dbm", "fully_feasible": True},
-                {"hypothesis_id": "paper_db_as_dbw", "fully_feasible": True},
+                {
+                    "hypothesis_id": "paper_db_as_dbm",
+                    "fully_feasible": True,
+                    "calibration_admissible": True,
+                    "ordering_violations": 0,
+                    "power_direction_violations": 0,
+                },
+                {
+                    "hypothesis_id": "paper_db_as_dbw",
+                    "fully_feasible": True,
+                    "calibration_admissible": False,
+                    "ordering_violations": 0,
+                    "power_direction_violations": 0,
+                },
             ],
         }
         (directory / "power_hypothesis_lock.json").write_text(
@@ -160,6 +172,16 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
             )
             report_path.write_text(json.dumps(report), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "noise hypothesis"):
+                load_calibrated_profile(profile_path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path, report_path, _profile = self._write_pair(directory)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["cross_function_interference_hypothesis_id"] = (
+                "receiver_consistent_cross_channels"
+            )
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "cross-function"):
                 load_calibrated_profile(profile_path)
 
         with tempfile.TemporaryDirectory() as directory:

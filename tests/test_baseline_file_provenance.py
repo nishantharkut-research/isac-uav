@@ -26,6 +26,29 @@ def _bundle(root: Path):
     methods = {
         method: _checkpoint(root, f"{method}.pt") for method in METHOD_ORDER
     }
+    ambiguity = {
+        "noise_hypothesis_id": "description_literal_target_matches_ue",
+        "dtl_transfer_mode": "eq30_current_q_bellman_blend",
+        "dtl_transfer_schedule_id": "constant_upsilon",
+        "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
+        "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
+        "los_probability_hypothesis_id": "paper_eq6_literal_roles",
+        "channel_coherence_hypothesis_id": "episode_block_fading",
+        "cross_function_interference_hypothesis_id":
+            "paper_eq12_eq14_literal_cross_channels",
+    }
+    sanity = {
+        "schema_version": 1,
+        "kind": "pretraining_physical_sanity",
+        "passed": True,
+        "profile_digest": "a" * 64,
+        "physical_configuration_fingerprint": "b" * 64,
+        "source_tree_digest": "c" * 64,
+        **ambiguity,
+    }
+    sanity_path = root / "pretraining_physical_sanity.json"
+    sanity_path.write_text(json.dumps(sanity), encoding="utf-8")
+    sanity_digest = hashlib.sha256(sanity_path.read_bytes()).hexdigest()
     summary = {
         "schema_version": 1,
         "kind": "generated_result",
@@ -39,6 +62,8 @@ def _bundle(root: Path):
         "seeds": [1],
         "episodes": 1500,
         "evaluation_episodes": 5,
+        "pretraining_physical_sanity_sha256": sanity_digest,
+        **ambiguity,
         "seed_records": [{
             "seed": 1,
             "source_checkpoint": source["checkpoint"],
@@ -52,6 +77,8 @@ def _bundle(root: Path):
         "status": "complete",
         "summary": "baseline_summary.json",
         "summary_payload_sha256": result_payload_digest(summary),
+        "pretraining_physical_sanity": sanity_path.name,
+        "pretraining_physical_sanity_sha256": sanity_digest,
         **{
             field: summary[field]
             for field in (
@@ -65,6 +92,7 @@ def _bundle(root: Path):
                 "seeds",
                 "episodes",
                 "evaluation_episodes",
+                *ambiguity,
             )
         },
     }
@@ -111,6 +139,18 @@ class BaselineFileProvenanceTests(unittest.TestCase):
             passed, error = _validate_baseline_file_provenance(summary, root)
             self.assertFalse(passed)
             self.assertIn("source", error.lower())
+
+    def test_tampered_pretraining_sanity_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            summary = _bundle(root)
+            path = root / "pretraining_physical_sanity.json"
+            report = json.loads(path.read_text(encoding="utf-8"))
+            report["passed"] = False
+            path.write_text(json.dumps(report), encoding="utf-8")
+            passed, error = _validate_baseline_file_provenance(summary, root)
+            self.assertFalse(passed)
+            self.assertIn("physical-sanity", error.lower())
 
 
 if __name__ == "__main__":

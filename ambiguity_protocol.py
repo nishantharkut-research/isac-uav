@@ -6,12 +6,18 @@ import numpy as np
 
 from ambiguity_hypotheses import (
     DDPG_COMPARATOR_CSI_HYPOTHESES,
+    CHANNEL_COHERENCE_HYPOTHESES,
+    CROSS_FUNCTION_INTERFERENCE_HYPOTHESES,
+    LOS_PROBABILITY_HYPOTHESES,
     NOISE_HYPOTHESES,
     PRIMARY_NOISE_HYPOTHESIS_ID,
     PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID,
     PRIMARY_TRANSFER_UPDATE_HYPOTHESIS_ID,
     PRIMARY_WFB_HYPOTHESIS_ID,
     PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+    PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+    PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
+    PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
     TRANSFER_SCHEDULE_HYPOTHESES,
     TRANSFER_UPDATE_HYPOTHESES,
     WFB_HYPOTHESES,
@@ -21,13 +27,18 @@ from ambiguity_hypotheses import (
 SENSITIVITY_SCHEMA_VERSION = 1
 
 
-def _hypotheses(noise, update, schedule, wfb, ddpg_comparator_csi):
+def _hypotheses(noise, update, schedule, wfb, ddpg_comparator_csi,
+                los_probability, channel_coherence,
+                cross_function_interference):
     return {
         "noise": noise,
         "transfer_update": update,
         "transfer_schedule": schedule,
         "wfb": wfb,
         "ddpg_comparator_csi": ddpg_comparator_csi,
+        "los_probability": los_probability,
+        "channel_coherence": channel_coherence,
+        "cross_function_interference": cross_function_interference,
     }
 
 
@@ -38,6 +49,9 @@ def _primary():
         PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID,
         PRIMARY_WFB_HYPOTHESIS_ID,
         PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+        PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+        PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+        PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
     )
 
 
@@ -82,6 +96,29 @@ def build_sensitivity_plan(design="one_at_a_time"):
                     "ddpg_comparator_csi": "icsi_comparator",
                 },
             },
+            {
+                "id": "los_standard_mapped_roles",
+                "hypotheses": {
+                    **primary,
+                    "los_probability":
+                        "al_hourani_standard_mapped_roles",
+                },
+            },
+            {
+                "id": "independent_slot_fading",
+                "hypotheses": {
+                    **primary,
+                    "channel_coherence": "independent_slot_fading",
+                },
+            },
+            {
+                "id": "receiver_consistent_cross_interference",
+                "hypotheses": {
+                    **primary,
+                    "cross_function_interference":
+                        "receiver_consistent_cross_channels",
+                },
+            },
         ]
     elif design == "full_factorial":
         scenarios = []
@@ -90,7 +127,10 @@ def build_sensitivity_plan(design="one_at_a_time"):
                 TRANSFER_UPDATE_HYPOTHESES,
                 TRANSFER_SCHEDULE_HYPOTHESES,
                 WFB_HYPOTHESES,
-                DDPG_COMPARATOR_CSI_HYPOTHESES)):
+                DDPG_COMPARATOR_CSI_HYPOTHESES,
+                LOS_PROBABILITY_HYPOTHESES,
+                CHANNEL_COHERENCE_HYPOTHESES,
+                CROSS_FUNCTION_INTERFERENCE_HYPOTHESES)):
             hypotheses = _hypotheses(*combination)
             identifier = (
                 "primary" if hypotheses == _primary()
@@ -151,6 +191,11 @@ def build_sensitivity_report(plan, summaries):
             "wfb_hypothesis_id": hypotheses["wfb"],
             "ddpg_comparator_csi_hypothesis_id":
                 hypotheses["ddpg_comparator_csi"],
+            "los_probability_hypothesis_id": hypotheses["los_probability"],
+            "channel_coherence_hypothesis_id":
+                hypotheses["channel_coherence"],
+            "cross_function_interference_hypothesis_id":
+                hypotheses["cross_function_interference"],
         }
         if any(
             summary.get(key) != value

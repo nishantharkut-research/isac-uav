@@ -5,9 +5,9 @@
 | Paper item | Code | Status and interpretation |
 |---|---|---|
 | Eqs. (1)-(2), UAV closure and step | `paper_contract.project_uav_step`, `environment._controls_from_action`, `environment._trajectory_diagnostics` | Every candidate is checked for bounds, step length, remaining return reachability, and exact final-slot closure. Feasibility fallback keeps the already projected UAV position, so a signal-control fallback cannot undo closure. |
-| Eqs. (3)-(9), path loss and Rician channels | `channel_model.py` | Seeded BS-HRIS, HRIS-ground, and direct channels with ULA/UPA responses. Eq. (5) maps `zeta_e=zeta_los-zeta_nlos`, `zeta_0=zeta_nlos`. Eq. (8) Doppler uses target radial velocity and is applied only to the moving-target LoS term. Omitted constants are profile assumptions. |
+| Eqs. (3)-(9), path loss and Rician channels | `channel_model.py` | Seeded BS-HRIS, HRIS-ground, and direct channels with ULA/UPA responses. Eq. (5) maps `zeta_e=zeta_los-zeta_nlos`, `zeta_0=zeta_nlos`. Printed Eq. (6) symbol roles are primary and the standard Al-Hourani mapping is sensitivity. Eq. (8) Doppler uses target radial velocity and is applied only to the moving-target LoS term. Omitted constants are profile assumptions. |
 | Eqs. (10)-(11), composite channels | `ChannelSet.composite_ue`, `ChannelSet.composite_te` | Passive path serves communication users and active path serves sensing targets, plus direct links. |
-| Eqs. (12)-(15), SINR/rates | `sinr_rate.compute_rates` | Per-user and per-target rates; cross-function interference retained as written in the paper. Eq. (12)'s target-indexed active-noise channel in a UE denominator is represented by the mean target-channel active-noise power because the paper gives no UE-target index mapping. |
+| Eqs. (12)-(15), SINR/rates | `sinr_rate.compute_rates` | Per-user and per-target rates. The printed cross-function channels are reproduction-primary; receiver-consistent channels are a predeclared sensitivity. Eq. (12)'s target-indexed active-noise channel in a UE denominator is represented by the mean target-channel active-noise power because the paper gives no UE-target index mapping. |
 | Eq. (16), baseline objective | `ObjectiveSpec.paper`, `evaluate_objective` | Exactly `sum_u R_u`; sensing remains a hard rate constraint. |
 | Eqs. (16a)-(16b), phase/amplification | `environment._controls_from_action`, `_find_feasible_controls` | Unit passive phases, bounded active phases and amplitudes. Infeasible proposals use a deterministic descending path scan plus refinement; no monotone-feasibility assumption is made. If both endpoints fail, bounded zero/half/full-gain phase templates are tested on the same channel. Replay receives the executed control. |
 | Eq. (16c), passive cascade | `paper_contract.cascade_power_16c` | Checked as a physical feasibility condition. |
@@ -15,8 +15,8 @@
 | Eq. (16e), target rate | `ObjectiveSpec.target_rate_min`, beam allocation | Per-target floor. The paper omits its numeric value. |
 | Eq. (16f), total BS power | `beamformers_from_powers` | Per-stream nonnegative powers sum to at most `P_T`. |
 | Eq. (17), Capon | `sinr_rate.capon_beamformer` | Deterministic covariance assumption because paper snapshots are unavailable. |
-| Eq. (19), coherence rate | `sinr_rate.coherence_corrected_rate` | Direct implementation. |
-| Eqs. (20)-(25), SCEE | `ChannelSet`, `_compute_scee_rates` | Estimated channels plus effective error covariance and matrix log-determinant rates. |
+| Eq. (19), coherence rate | `sinr_rate.coherence_corrected_rate` | Validated utility with the corrected overhead guard. It is not applied to paper curves because the paper omits the required coherence interval. |
+| Eqs. (20)-(25), SCEE | `ChannelSet`, `_compute_scee_rates` | Estimated channels plus effective error covariance and matrix log-determinant rates. The matrix model is used at both zero and positive estimation error so no formula-switch discontinuity occurs. |
 | Eqs. (26)-(29), DDPG | `ddpg_agent.DDPGAgent` | Replay, Bellman critic update, deterministic actor update, and soft targets using `self.tau`. |
 | Eq. (30), transfer value | `dtl_agent.DTLAgent` | Primary: current source Q blended with the Eq. (26) target Bellman value. Sensitivity: source/target next-state continuation blend. Terminal transitions use raw reward and never reintroduce bootstrap value. |
 | Algorithms 2-3, AO | `ao_optimizer.py` | Numerical SciPy constrained approximation because the author CVX implementation and auxiliary values are unavailable. Published convergence histories are raw iterates; best-feasible tracking affects only the returned final solution. |
@@ -59,11 +59,12 @@ description simultaneously. Neither is presented as unpublished author fact.
 ## Non-power hypothesis protocol
 
 `ambiguity_hypotheses.py` defines closed registries for noise mapping,
-Equation 30 update, transfer schedule, DTL-WFB replacement, and the undisclosed
-CSI condition of the standalone DDPG comparator. Primary
+Equation 30 update, transfer schedule, DTL-WFB replacement, the undisclosed CSI
+condition of the standalone DDPG comparator, LoS symbol roles, small-scale
+channel coherence, and cross-function interference channels. Primary
 branches minimize unsupported mechanics or follow the strongest semantic
 evidence. `run_ambiguity_sensitivity.py` executes one-factor alternatives by
-default and can execute the full 32-combination factorial.
+default and can execute the full 256-combination factorial.
 
 The primary DDPG comparator uses pCSI, matching DTL-pCSI so an algorithmic
 comparison does not also change channel-estimation quality. The earlier iCSI
@@ -85,11 +86,12 @@ paper_db_as_dbm: 10 dB label -> 10 dBm -> 0.01 W
 paper_db_as_dbw: 10 dB label -> 10 dBW -> 10 W
 ```
 
-Both use common Figure 6 calibration seeds. Infeasible branches are rejected;
-the remaining branches are ranked by ordering violations, normalized curve
-error, then normalized slope error. The selection is locked before Figure 4 or
-any other holdout is evaluated. A larger simulated reward is not a selection
-criterion.
+Both use common Figure 6 calibration seeds. Infeasible branches, pCSI/iCSI
+ordering violations, material power-direction reversals, less than half the
+paper's total power response, and normalized curve error above `0.15` are hard
+rejections. Remaining branches are ranked by normalized curve error and slope
+error. The selection is locked before Figure 4 or any other holdout is
+evaluated. A larger simulated reward is not a selection criterion.
 
 ## Values not numerically disclosed by the paper
 
@@ -114,8 +116,10 @@ current profile schema cannot override these seeds; a transfer-domain study
 therefore requires a separately preregistered protocol and code change.
 
 These values are marked in `parameter_evidence.py`. Reported values are locked.
-Omitted values are structurally selected and, where declared, calibrated only
-against the Fig. 6 `AO-pCSI` and `AO-iCSI` curves. Figures 4, 5, 7, 8, 9, 13,
+Only the declared channel/geometry subset is structurally selected and then
+calibrated against the Fig. 6 `AO-pCSI` and `AO-iCSI` curves. The undisclosed
+`R_min`, `Psi_max`, and `P_a_max` remain explicit assumptions/sensitivities;
+they are not derived from a favorable candidate. Figures 4, 5, 7, 8, 9, 13,
 and 14 are holdouts and never enter selection. In particular, the AO solver is
 not used to fit Figure 5 convergence or the Figure 7 DTL/HRIS curve.
 
@@ -151,7 +155,8 @@ remain descriptive, and Figure 12 remains hardware-dependent.
 `checkpointing.py` stores full mutable training state and RNG state with an
 identity containing profile, physical configuration, objective, dimensions,
 CSI mode, allocator, power convention, noise mapping, Equation 30 update,
-transfer schedule, and WFB interpretation. Atomic
+transfer schedule, WFB interpretation, LoS mapping, channel coherence, and
+cross-function interference interpretation. Atomic
 replacement preserves the previous file if a write is interrupted. Resume
 begins at the next unfinished episode. Restore also validates episode boundary,
 array shapes, finite values, history lengths, and requested episode count.

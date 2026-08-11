@@ -81,6 +81,27 @@ class AnchorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ParetoAnchors.from_state_dict(state)
 
+    def test_quantile_anchors_reject_outliers_and_have_stable_identity(self):
+        typical = np.column_stack([
+            np.linspace(1.0, 3.0, 100),
+            np.linspace(10.0, 14.0, 100),
+        ])
+        values = np.vstack([typical, [-1_000.0, 1_000.0], [1_000.0, -1_000.0]])
+        anchors = ParetoAnchors()
+        anchors.update_training(values, lower_quantile=0.05, upper_quantile=0.95)
+        anchors.freeze({"partition": "converged_training_tail"})
+
+        self.assertGreater(anchors.nadir[0], -1_000.0)
+        self.assertGreater(anchors.nadir[1], -1_000.0)
+        self.assertLess(anchors.ideal[0], 1_000.0)
+        self.assertLess(anchors.ideal[1], 1_000.0)
+        restored = ParetoAnchors.from_state_dict(anchors.state_dict())
+        self.assertEqual(restored.digest(), anchors.digest())
+
+        altered = ParetoAnchors.from_state_dict(anchors.state_dict())
+        altered.provenance["partition"] = "different"
+        self.assertNotEqual(altered.digest(), anchors.digest())
+
 
 class ParetoAndStatisticsTests(unittest.TestCase):
     def test_nondominance_and_known_hypervolume(self):

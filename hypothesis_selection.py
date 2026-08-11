@@ -13,6 +13,8 @@ from physical_hypotheses import POWER_HYPOTHESES
 SELECTION_SCHEMA_VERSION = 1
 CALIBRATION_FIGURE = 6
 CALIBRATION_METHODS = ("AO-pCSI", "AO-iCSI")
+MAX_NORMALIZED_CURVE_ERROR = 0.15
+MIN_POWER_RESPONSE_RATIO = 0.50
 
 
 def _curve(candidate, reference, label):
@@ -62,7 +64,10 @@ def score_power_hypothesis(candidate: dict, reference_source) -> dict:
         return {
             "hypothesis_id": identifier,
             "fully_feasible": False,
+            "calibration_admissible": False,
             "ordering_violations": int(rejected_score),
+            "power_direction_violations": int(rejected_score),
+            "minimum_power_response_ratio": 0.0,
             "normalized_curve_error": rejected_score,
             "normalized_slope_error": rejected_score,
             "score_tuple": [int(rejected_score), rejected_score, rejected_score],
@@ -75,10 +80,24 @@ def score_power_hypothesis(candidate: dict, reference_source) -> dict:
     observed_curves = {}
     curve_residuals = []
     slope_residuals = []
+    power_direction_violations = 0
+    power_response_ratios = []
     for label in CALIBRATION_METHODS:
         generated, observed = _curve(candidate, reference, label)
         generated_curves[label] = generated
         observed_curves[label] = observed
+        generated_slopes = np.diff(generated)
+        observed_response = float(observed[-1] - observed[0])
+        if observed_response <= 0.0:
+            raise ValueError(
+                f"Figure 6 reference for {label} must increase with power"
+            )
+        power_direction_violations += int(
+            np.sum(generated_slopes < -uncertainty)
+        )
+        power_response_ratios.append(
+            float((generated[-1] - generated[0]) / observed_response)
+        )
         curve_scale = np.maximum(np.abs(observed), uncertainty)
         curve_residuals.extend(((generated - observed) / curve_scale).tolist())
         observed_slope = np.diff(observed)
@@ -97,10 +116,21 @@ def score_power_hypothesis(candidate: dict, reference_source) -> dict:
 
     curve_error = float(np.sqrt(np.mean(np.square(curve_residuals))))
     slope_error = float(np.sqrt(np.mean(np.square(slope_residuals))))
+    minimum_response = float(min(power_response_ratios))
+    admissible = bool(
+        feasible
+        and ordering_violations == 0
+        and power_direction_violations == 0
+        and minimum_response >= MIN_POWER_RESPONSE_RATIO
+        and curve_error <= MAX_NORMALIZED_CURVE_ERROR
+    )
     return {
         "hypothesis_id": identifier,
         "fully_feasible": feasible,
+        "calibration_admissible": admissible,
         "ordering_violations": ordering_violations,
+        "power_direction_violations": power_direction_violations,
+        "minimum_power_response_ratio": minimum_response,
         "normalized_curve_error": curve_error,
         "normalized_slope_error": slope_error,
         "score_tuple": [ordering_violations, curve_error, slope_error],
@@ -121,9 +151,19 @@ def select_power_hypothesis(candidates, reference_source) -> dict:
     feasible = [item for item in scored if item["fully_feasible"]]
     if not feasible:
         raise ValueError("No power hypothesis is fully feasible")
+    admissible = [item for item in feasible if item["calibration_admissible"]]
+    if not admissible:
+        raise ValueError(
+            "No power hypothesis satisfies the physical-ordering and Figure 6 "
+            "calibration-fidelity gates"
+        )
     selected = min(
-        feasible,
-        key=lambda item: (*item["score_tuple"], item["hypothesis_id"]),
+        admissible,
+        key=lambda item: (
+            item["normalized_curve_error"],
+            item["normalized_slope_error"],
+            item["hypothesis_id"],
+        ),
     )
     return {
         "schema_version": SELECTION_SCHEMA_VERSION,
@@ -132,9 +172,15 @@ def select_power_hypothesis(candidates, reference_source) -> dict:
         "calibration_figures_used": [CALIBRATION_FIGURE],
         "holdout_figures_used": [],
         "selection_rule": (
-            "fully feasible, then lexicographic ordering violations, "
-            "normalized curve error, normalized slope error"
+            "fully feasible; zero pCSI/iCSI ordering and material power-"
+            "direction violations; at least 50% of the reference power "
+            "response; normalized curve error <= 0.15; then normalized curve "
+            "and slope error"
         ),
+        "admissibility_thresholds": {
+            "maximum_normalized_curve_error": MAX_NORMALIZED_CURVE_ERROR,
+            "minimum_power_response_ratio": MIN_POWER_RESPONSE_RATIO,
+        },
         "common_random_seeds": list(next(iter(seed_sets))),
         "candidate_scores": sorted(scored, key=lambda item: item["hypothesis_id"]),
         "selected_hypothesis_id": selected["hypothesis_id"],

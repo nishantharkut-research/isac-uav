@@ -172,6 +172,15 @@ def main(argv=None):
             "ddpg_comparator_csi_hypothesis_id": summary[
                 "ddpg_comparator_csi_hypothesis_id"
             ],
+            "los_probability_hypothesis_id": summary[
+                "los_probability_hypothesis_id"
+            ],
+            "channel_coherence_hypothesis_id": summary[
+                "channel_coherence_hypothesis_id"
+            ],
+            "cross_function_interference_hypothesis_id": summary[
+                "cross_function_interference_hypothesis_id"
+            ],
             "baseline_payload_sha256": summary["baseline_payload_sha256"],
             "baseline_validation_sha256": summary[
                 "baseline_validation_sha256"

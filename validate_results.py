@@ -145,7 +145,34 @@ def _validate_baseline_file_provenance(result, root: Path):
     if not manifest_path.is_file():
         return False, "Completed baseline run manifest is missing."
     with manifest_path.open("r", encoding="utf-8") as stream:
-        _validate_baseline_manifest_payload(result, json.load(stream))
+        manifest = json.load(stream)
+    _validate_baseline_manifest_payload(result, manifest)
+    sanity_path = root / "pretraining_physical_sanity.json"
+    sanity_digest = result.get("pretraining_physical_sanity_sha256")
+    if (
+        manifest.get("pretraining_physical_sanity") != sanity_path.name
+        or manifest.get("pretraining_physical_sanity_sha256") != sanity_digest
+        or not sanity_path.is_file()
+        or not _is_sha256(sanity_digest)
+        or _sha256_file(sanity_path) != sanity_digest
+    ):
+        return False, "Pre-training physical-sanity authority mismatch."
+    try:
+        with sanity_path.open("r", encoding="utf-8") as stream:
+            sanity = json.load(stream)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False, "Pre-training physical-sanity report is invalid."
+    if (
+        sanity.get("schema_version") != 1
+        or sanity.get("kind") != "pretraining_physical_sanity"
+        or sanity.get("passed") is not True
+        or sanity.get("profile_digest") != result.get("profile_digest")
+        or sanity.get("physical_configuration_fingerprint")
+        != result.get("physical_configuration_fingerprint")
+        or sanity.get("source_tree_digest") != result.get("source_tree_digest")
+        or not _valid_ambiguity_contract(sanity)
+    ):
+        return False, "Pre-training physical-sanity report is unauthorized."
     return True, None
 
 

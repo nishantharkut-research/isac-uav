@@ -161,6 +161,11 @@ def _configuration_fingerprint(payload=None):
         "wfb_hypothesis_id": cfg.wfb_hypothesis_id,
         "ddpg_comparator_csi_hypothesis_id":
             cfg.ddpg_comparator_csi_hypothesis_id,
+        "los_probability_hypothesis_id": cfg.los_probability_hypothesis_id,
+        "channel_coherence_hypothesis_id":
+            cfg.channel_coherence_hypothesis_id,
+        "cross_function_interference_hypothesis_id":
+            cfg.cross_function_interference_hypothesis_id,
         "sigma2_u": cfg.sigma2_u,
         "sigma2_k": cfg.sigma2_k,
         "sigma2_a": cfg.sigma2_a,
@@ -251,6 +256,11 @@ def _training_identity(env, tag, algorithm, requested_episodes,
         "wfb_hypothesis_id": cfg.wfb_hypothesis_id,
         "ddpg_comparator_csi_hypothesis_id":
             cfg.ddpg_comparator_csi_hypothesis_id,
+        "los_probability_hypothesis_id": cfg.los_probability_hypothesis_id,
+        "channel_coherence_hypothesis_id":
+            cfg.channel_coherence_hypothesis_id,
+        "cross_function_interference_hypothesis_id":
+            cfg.cross_function_interference_hypothesis_id,
     }
 
 

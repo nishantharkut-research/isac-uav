@@ -47,11 +47,40 @@ class DDPGComparatorCSIHypothesis:
     rationale: str
 
 
+@dataclass(frozen=True)
+class LoSProbabilityHypothesis:
+    identifier: str
+    role: str
+    formula: str
+    rationale: str
+
+
+@dataclass(frozen=True)
+class ChannelCoherenceHypothesis:
+    identifier: str
+    role: str
+    resample_each_slot: bool
+    rationale: str
+
+
+@dataclass(frozen=True)
+class CrossFunctionInterferenceHypothesis:
+    identifier: str
+    role: str
+    receiver_consistent: bool
+    rationale: str
+
+
 PRIMARY_NOISE_HYPOTHESIS_ID = "description_literal_target_matches_ue"
 PRIMARY_TRANSFER_UPDATE_HYPOTHESIS_ID = "eq30_current_q_bellman_blend"
 PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID = "constant_upsilon"
 PRIMARY_WFB_HYPOTHESIS_ID = "adaptive_matched_filter_no_capon"
 PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID = "fair_pcsi_comparator"
+PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID = "paper_eq6_literal_roles"
+PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID = "episode_block_fading"
+PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID = (
+    "paper_eq12_eq14_literal_cross_channels"
+)
 
 
 NOISE_HYPOTHESES = MappingProxyType({
@@ -167,12 +196,86 @@ DDPG_COMPARATOR_CSI_HYPOTHESES = MappingProxyType({
 })
 
 
+LOS_PROBABILITY_HYPOTHESES = MappingProxyType({
+    PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID: LoSProbabilityHypothesis(
+        identifier=PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+        role="primary",
+        formula="1/(1+b_env*exp(-a_env*(elevation-b_env)))",
+        rationale=(
+            "Evaluate Eq. (6) exactly as printed while retaining the commonly "
+            "used urban constants as an explicit omitted-parameter assumption."
+        ),
+    ),
+    "al_hourani_standard_mapped_roles": LoSProbabilityHypothesis(
+        identifier="al_hourani_standard_mapped_roles",
+        role="sensitivity",
+        formula="1/(1+a_env*exp(-b_env*(elevation-a_env)))",
+        rationale=(
+            "Interpret the paper's symbols as a role renaming of the standard "
+            "Al-Hourani urban formula: paper a=b_env and paper b=a_env."
+        ),
+    ),
+})
+
+
+CHANNEL_COHERENCE_HYPOTHESES = MappingProxyType({
+    PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID: ChannelCoherenceHypothesis(
+        identifier=PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+        role="primary",
+        resample_each_slot=False,
+        rationale=(
+            "Keep one latent small-scale realization within an episode so the "
+            "instantaneous CSI in s_t is relevant to a_t; geometry and target "
+            "Doppler still evolve each slot."
+        ),
+    ),
+    "independent_slot_fading": ChannelCoherenceHypothesis(
+        identifier="independent_slot_fading",
+        role="sensitivity",
+        resample_each_slot=True,
+        rationale=(
+            "Resample independent small-scale fading each slot as a conservative "
+            "fast-fading sensitivity, despite weakening state-action observability."
+        ),
+    ),
+})
+
+
+CROSS_FUNCTION_INTERFERENCE_HYPOTHESES = MappingProxyType({
+    PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID:
+        CrossFunctionInterferenceHypothesis(
+            identifier=PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
+            role="primary",
+            receiver_consistent=False,
+            rationale=(
+                "Reproduce the cross-function interference terms in Eqs. "
+                "(12), (14), (21), and (25) exactly as printed."
+            ),
+        ),
+    "receiver_consistent_cross_channels":
+        CrossFunctionInterferenceHypothesis(
+            identifier="receiver_consistent_cross_channels",
+            role="sensitivity",
+            receiver_consistent=True,
+            rationale=(
+                "Route both communication and sensing waveforms through the "
+                "channel of the receiver whose SINR is being evaluated; this "
+                "matches the physical receiver convention used in Remark 1."
+            ),
+        ),
+})
+
+
 AMBIGUITY_IDENTITY_REGISTRIES = MappingProxyType({
     "noise_hypothesis_id": NOISE_HYPOTHESES,
     "dtl_transfer_mode": TRANSFER_UPDATE_HYPOTHESES,
     "dtl_transfer_schedule_id": TRANSFER_SCHEDULE_HYPOTHESES,
     "wfb_hypothesis_id": WFB_HYPOTHESES,
     "ddpg_comparator_csi_hypothesis_id": DDPG_COMPARATOR_CSI_HYPOTHESES,
+    "los_probability_hypothesis_id": LOS_PROBABILITY_HYPOTHESES,
+    "channel_coherence_hypothesis_id": CHANNEL_COHERENCE_HYPOTHESES,
+    "cross_function_interference_hypothesis_id":
+        CROSS_FUNCTION_INTERFERENCE_HYPOTHESES,
 })
 
 
@@ -207,6 +310,22 @@ def get_ddpg_comparator_csi_hypothesis(identifier):
     )
 
 
+def get_los_probability_hypothesis(identifier):
+    return _lookup(LOS_PROBABILITY_HYPOTHESES, identifier, "LoS probability")
+
+
+def get_channel_coherence_hypothesis(identifier):
+    return _lookup(CHANNEL_COHERENCE_HYPOTHESES, identifier, "channel coherence")
+
+
+def get_cross_function_interference_hypothesis(identifier):
+    return _lookup(
+        CROSS_FUNCTION_INTERFERENCE_HYPOTHESES,
+        identifier,
+        "cross-function interference",
+    )
+
+
 def ddpg_comparator_scee(config):
     """Return the comparator NMSE without result-dependent selection."""
     hypothesis = get_ddpg_comparator_csi_hypothesis(
@@ -222,7 +341,13 @@ def apply_ambiguity_hypotheses(
         transfer_schedule_hypothesis_id=PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID,
         wfb_hypothesis_id=PRIMARY_WFB_HYPOTHESIS_ID,
         ddpg_comparator_csi_hypothesis_id=
-        PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID):
+        PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+        los_probability_hypothesis_id=
+        PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+        channel_coherence_hypothesis_id=
+        PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+        cross_function_interference_hypothesis_id=
+        PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID):
     """Apply one complete, predeclared ambiguity configuration."""
     noise = get_noise_hypothesis(noise_hypothesis_id)
     update = get_transfer_update_hypothesis(transfer_update_hypothesis_id)
@@ -232,6 +357,15 @@ def apply_ambiguity_hypotheses(
     wfb = get_wfb_hypothesis(wfb_hypothesis_id)
     ddpg_csi = get_ddpg_comparator_csi_hypothesis(
         ddpg_comparator_csi_hypothesis_id
+    )
+    los_probability = get_los_probability_hypothesis(
+        los_probability_hypothesis_id
+    )
+    coherence = get_channel_coherence_hypothesis(
+        channel_coherence_hypothesis_id
+    )
+    cross_interference = get_cross_function_interference_hypothesis(
+        cross_function_interference_hypothesis_id
     )
 
     config.noise_hypothesis_id = noise.identifier
@@ -246,6 +380,11 @@ def apply_ambiguity_hypotheses(
     config.wfb_hypothesis_id = wfb.identifier
     config.wfb_beamformer_mode = wfb.beamformer_mode
     config.ddpg_comparator_csi_hypothesis_id = ddpg_csi.identifier
+    config.los_probability_hypothesis_id = los_probability.identifier
+    config.channel_coherence_hypothesis_id = coherence.identifier
+    config.cross_function_interference_hypothesis_id = (
+        cross_interference.identifier
+    )
     return ambiguity_metadata(config)
 
 
@@ -258,6 +397,8 @@ def applied_ambiguity_hypotheses(config, **overrides):
         "dtl_transfer_mode", "dtl_transfer_schedule_id",
         "wfb_hypothesis_id", "wfb_beamformer_mode",
         "ddpg_comparator_csi_hypothesis_id",
+        "los_probability_hypothesis_id", "channel_coherence_hypothesis_id",
+        "cross_function_interference_hypothesis_id",
     )
     saved = {field: getattr(config, field) for field in fields}
     try:
@@ -278,6 +419,15 @@ def ambiguity_metadata(config):
     ddpg_csi = get_ddpg_comparator_csi_hypothesis(
         config.ddpg_comparator_csi_hypothesis_id
     )
+    los_probability = get_los_probability_hypothesis(
+        config.los_probability_hypothesis_id
+    )
+    coherence = get_channel_coherence_hypothesis(
+        config.channel_coherence_hypothesis_id
+    )
+    cross_interference = get_cross_function_interference_hypothesis(
+        config.cross_function_interference_hypothesis_id
+    )
     return {
         "schema_version": 1,
         "kind": "ambiguity_hypothesis_contract",
@@ -288,6 +438,9 @@ def ambiguity_metadata(config):
             "transfer_schedule": asdict(schedule),
             "wfb": asdict(wfb),
             "ddpg_comparator_csi": asdict(ddpg_csi),
+            "los_probability": asdict(los_probability),
+            "channel_coherence": asdict(coherence),
+            "cross_function_interference": asdict(cross_interference),
         },
     }
 
@@ -300,6 +453,15 @@ def apply_ambiguity_manifest_fields(payload, config):
     payload["wfb_hypothesis_id"] = config.wfb_hypothesis_id
     payload["ddpg_comparator_csi_hypothesis_id"] = (
         config.ddpg_comparator_csi_hypothesis_id
+    )
+    payload["los_probability_hypothesis_id"] = (
+        config.los_probability_hypothesis_id
+    )
+    payload["channel_coherence_hypothesis_id"] = (
+        config.channel_coherence_hypothesis_id
+    )
+    payload["cross_function_interference_hypothesis_id"] = (
+        config.cross_function_interference_hypothesis_id
     )
     payload["ambiguity_contract"] = ambiguity_metadata(config)
     return payload
@@ -321,6 +483,12 @@ def require_matching_ambiguity_contract(payload, config, label="Baseline"):
         "wfb_hypothesis_id": config.wfb_hypothesis_id,
         "ddpg_comparator_csi_hypothesis_id":
             config.ddpg_comparator_csi_hypothesis_id,
+        "los_probability_hypothesis_id":
+            config.los_probability_hypothesis_id,
+        "channel_coherence_hypothesis_id":
+            config.channel_coherence_hypothesis_id,
+        "cross_function_interference_hypothesis_id":
+            config.cross_function_interference_hypothesis_id,
     }
     mismatches = [
         key for key, value in expected.items() if payload.get(key) != value
@@ -359,6 +527,21 @@ def add_ambiguity_cli_arguments(parser):
         choices=tuple(DDPG_COMPARATOR_CSI_HYPOTHESES),
         default=PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
     )
+    parser.add_argument(
+        "--los-probability-hypothesis",
+        choices=tuple(LOS_PROBABILITY_HYPOTHESES),
+        default=PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+    )
+    parser.add_argument(
+        "--channel-coherence-hypothesis",
+        choices=tuple(CHANNEL_COHERENCE_HYPOTHESES),
+        default=PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+    )
+    parser.add_argument(
+        "--cross-function-interference-hypothesis",
+        choices=tuple(CROSS_FUNCTION_INTERFERENCE_HYPOTHESES),
+        default=PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
+    )
     return parser
 
 
@@ -371,4 +554,8 @@ def apply_ambiguity_arguments(args, config):
         wfb_hypothesis_id=args.wfb_hypothesis,
         ddpg_comparator_csi_hypothesis_id=
             args.ddpg_comparator_csi_hypothesis,
+        los_probability_hypothesis_id=args.los_probability_hypothesis,
+        channel_coherence_hypothesis_id=args.channel_coherence_hypothesis,
+        cross_function_interference_hypothesis_id=
+            args.cross_function_interference_hypothesis,
     )

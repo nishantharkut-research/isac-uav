@@ -161,6 +161,24 @@ class BAPCDTLUpdateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "baseline"):
             agent.load_training_state_dict(state)
 
+    def test_restore_rejects_different_pareto_anchors(self):
+        baseline = DDPGAgent(4, 2)
+        source = BAPCDTLAgent(
+            baseline, 4, 2, replay_capacity=4, batch_size=2,
+            anchors=_frozen_anchors(),
+        )
+        state = source.training_state_dict()
+
+        different = ParetoAnchors()
+        different.update_training([[0.0, 1.0], [7.0, 9.0]])
+        different.freeze({"partition": "different_training_data"})
+        target = BAPCDTLAgent(
+            baseline, 4, 2, replay_capacity=4, batch_size=2,
+            anchors=different,
+        )
+        with self.assertRaisesRegex(ValueError, "contract|anchor"):
+            target.load_training_state_dict(state)
+
 
 if __name__ == "__main__":
     unittest.main()

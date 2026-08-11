@@ -292,9 +292,13 @@ def test_scee_rate_uses_matrix_logdet_eq21():
     assert np.isclose(rate_u[0], expected)
 
 
-def test_perfect_csi_default_rate_uses_eq12_to_eq15_path():
+def test_perfect_csi_default_rate_uses_zero_error_eq21_eq25_path():
     from channel_model import ChannelSet
-    from sinr_rate import build_beamformers, compute_rates
+    from sinr_rate import (
+        _compute_scee_rates,
+        build_beamformers,
+        compute_rates,
+    )
 
     pos_uav = np.array([150.0, 100.0, cfg.z_UAV])
     pos_ues = [np.array([30.0 + 50.0 * i, 40.0, 0.0]) for i in range(cfg.U)]
@@ -305,10 +309,16 @@ def test_perfect_csi_default_rate_uses_eq12_to_eq15_path():
     C, T = build_beamformers(channel, theta, phi)
 
     default_rates = compute_rates(channel, theta, phi, C, T)
-    paper_perfect_rates = compute_rates(
-        channel, theta, phi, C, T, use_scee_model=False
+    robust_zero_error_rates = _compute_scee_rates(
+        channel,
+        theta,
+        phi,
+        C,
+        T,
+        channel.composite_ue(theta),
+        channel.composite_te(phi),
     )
-    for default, expected in zip(default_rates, paper_perfect_rates):
+    for default, expected in zip(default_rates, robust_zero_error_rates):
         assert np.allclose(default, expected)
 
 

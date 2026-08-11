@@ -19,6 +19,8 @@ IMMUTABLE_MANIFEST_FIELDS = (
     "training_seed_protocol", "noise_hypothesis_id",
     "dtl_transfer_schedule_id", "wfb_hypothesis_id",
     "ddpg_comparator_csi_hypothesis_id",
+    "los_probability_hypothesis_id", "channel_coherence_hypothesis_id",
+    "cross_function_interference_hypothesis_id",
     "algorithm_id", "research_seeds", "validation_scene_seeds",
     "test_scene_seeds", "preference_grid", "residual_radius",
     "residual_scales", "ensemble_size", "gate_selection_grid",
@@ -75,6 +77,12 @@ def physical_configuration_fingerprint(profile_digest, cfg) -> str:
         "noise_hypothesis_id": cfg.noise_hypothesis_id,
         "ddpg_comparator_csi_hypothesis_id":
             cfg.ddpg_comparator_csi_hypothesis_id,
+        "los_probability_hypothesis_id":
+            cfg.los_probability_hypothesis_id,
+        "channel_coherence_hypothesis_id":
+            cfg.channel_coherence_hypothesis_id,
+        "cross_function_interference_hypothesis_id":
+            cfg.cross_function_interference_hypothesis_id,
         "PT_dB": cfg.PT_dB, "PT_W": cfg.PT,
         "PT_display_unit": cfg.PT_display_unit,
         "PT_reference": cfg.PT_reference,
@@ -132,6 +140,18 @@ def atomic_write_json(path, payload):
         if temporary.exists():
             temporary.unlink()
     return path
+
+
+def write_immutable_json(path, payload):
+    """Create a JSON sidecar once or verify its exact structured content."""
+    path = Path(path)
+    if path.is_file():
+        with path.open("r", encoding="utf-8") as stream:
+            existing = json.load(stream)
+        if existing != payload:
+            raise ValueError(f"Immutable JSON differs from existing {path.name}")
+        return path
+    return atomic_write_json(path, payload)
 
 
 def ensure_run_directory(output_dir, expected_manifest):

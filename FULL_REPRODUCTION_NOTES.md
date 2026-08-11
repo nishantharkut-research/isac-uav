@@ -59,7 +59,8 @@ The full multi-seed DRL commands are long training runs and use checkpoints.
   primary comparator uses pCSI to match DTL-pCSI and avoid a confounded
   algorithm comparison; DDPG under iCSI is a non-selecting sensitivity.
 - The one-factor ambiguity study reuses an accepted primary baseline and trains
-  five isolated alternatives. Its report contains no result-based winner.
+  eight isolated alternatives, including LoS roles, channel coherence, and
+  cross-function interference. Its report contains no result-based winner.
 - Full DRL training was not run while preparing this source package. Numerical
   agreement or improvement is established only by completed multi-seed runs:
   `validate_results.py` for the paper baseline and

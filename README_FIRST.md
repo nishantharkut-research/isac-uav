@@ -8,6 +8,9 @@ Start with `REPRODUCTION_GUIDE.md`. This package has two sequential goals:
    proposed Baseline-Anchored Preference-Conditioned Deep Transfer Learning
    (BA-PCDTL) method.
 
+`E2E_CORRECTION_REPORT.md` records the verified defects, disputed diagnoses,
+and exact correction boundary relative to the preserved Git baseline.
+
 The supplied code already contained sensing rates and weighted sweeps. The
 research contribution is therefore not "adding sensing." BA-PCDTL instead uses
 a frozen accepted policy, a conditioned residual actor, vector twin critics,
@@ -33,6 +36,11 @@ feasibility, including return reachability and exact final closure. Recovery is
 deterministic on the same sampled channel; it never resamples a favorable
 scene. Source-tree hashes make older results and checkpoints inadmissible after
 code changes, so this final package requires a clean run.
+
+Before real baseline training, the runner automatically rejects a calibrated
+configuration that is infeasible or effectively insensitive to policy actions.
+Figure 6 calibration also fails closed on pCSI/iCSI inversion, flat power
+response, or a materially poor curve fit.
 
 Static source verification does not train DRL models:
 

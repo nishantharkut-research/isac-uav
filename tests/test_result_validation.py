@@ -45,6 +45,10 @@ class ResultValidationTests(unittest.TestCase):
             "dtl_transfer_schedule_id": "constant_upsilon",
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
+            "los_probability_hypothesis_id": "paper_eq6_literal_roles",
+            "channel_coherence_hypothesis_id": "episode_block_fading",
+            "cross_function_interference_hypothesis_id":
+                "paper_eq12_eq14_literal_cross_channels",
             "objective": {"mode": "paper_baseline"},
             "feasibility_rate": 1.0,
             "seeds": seeds,
@@ -231,6 +235,10 @@ class ResultValidationTests(unittest.TestCase):
             "dtl_transfer_schedule_id": "constant_upsilon",
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
+            "los_probability_hypothesis_id": "paper_eq6_literal_roles",
+            "channel_coherence_hypothesis_id": "episode_block_fading",
+            "cross_function_interference_hypothesis_id":
+                "paper_eq12_eq14_literal_cross_channels",
             "seeds": [1, 2, 3, 4, 5],
             "objective": {
                 "mode": "comm_retention_sensing",
@@ -274,6 +282,10 @@ class ResultValidationTests(unittest.TestCase):
             "dtl_transfer_schedule_id": "constant_upsilon",
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
+            "los_probability_hypothesis_id": "paper_eq6_literal_roles",
+            "channel_coherence_hypothesis_id": "episode_block_fading",
+            "cross_function_interference_hypothesis_id":
+                "paper_eq12_eq14_literal_cross_channels",
             "seeds": [1, 2, 3, 4, 5],
             "objective": {
                 "mode": "png_joint_sum",

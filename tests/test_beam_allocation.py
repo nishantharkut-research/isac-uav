@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -84,6 +86,40 @@ class BeamAllocationTests(unittest.TestCase):
         )
         self.assertFalse(result.feasible)
         self.assertGreater(result.total_normalized_deficit, 0.0)
+
+    def test_slsqp_objective_and_constraint_share_last_assessment(self):
+        constraints = AllocationConstraints(
+            total_power=10.0,
+            target_rate_min=0.5,
+            active_power_max=2.0,
+        )
+        calls = 0
+        observed = {}
+
+        def counted(powers):
+            nonlocal calls
+            calls += 1
+            return self._evaluate(powers)
+
+        def fake_minimize(objective, x0, constraints, **_kwargs):
+            before = calls
+            objective(x0)
+            after_objective = calls
+            constraints[0]["fun"](x0.copy())
+            observed["objective_calls"] = after_objective - before
+            observed["constraint_calls"] = calls - after_objective
+            return SimpleNamespace(x=np.asarray(x0), success=True)
+
+        with patch("beam_allocation.minimize", side_effect=fake_minimize):
+            optimize_power_allocation(
+                2,
+                2,
+                counted,
+                constraints,
+                ObjectiveSpec.paper(target_rate_min=0.5),
+            )
+        self.assertEqual(observed["objective_calls"], 1)
+        self.assertEqual(observed["constraint_calls"], 0)
 
     def test_fast_allocation_can_find_unequal_feasible_target_powers(self):
         def unequal_channels(powers):

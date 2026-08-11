@@ -474,6 +474,7 @@ class BAPCDTLAgent:
             "gate_margin": self.gate_margin,
             "transfer_trunks": self.transfer_trunks,
             "anchor_enabled": self.anchor_enabled,
+            "anchor_digest": self.anchors.digest(),
         }
 
     def training_state_dict(self) -> dict:
@@ -529,8 +530,11 @@ class BAPCDTLAgent:
             self.critic_optimizers, optimizer_states
         ):
             optimizer.load_state_dict(optimizer_state)
+        checkpoint_anchors = ParetoAnchors.from_state_dict(state["anchors"])
+        if checkpoint_anchors.digest() != self.anchors.digest():
+            raise ValueError("BA-PCDTL Pareto-anchor digest mismatch.")
         self.replay.load_state_dict(state["replay"])
-        self.anchors = ParetoAnchors.from_state_dict(state["anchors"])
+        self.anchors = checkpoint_anchors
         self.total_steps = int(state["total_steps"])
         self.baseline_actor.eval()
         for parameter in self.baseline_actor.parameters():

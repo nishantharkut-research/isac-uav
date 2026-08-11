@@ -10,6 +10,10 @@ from typing import Any, Mapping, Optional
 
 from config import cfg
 from physical_hypotheses import get_power_hypothesis
+from ambiguity_hypotheses import (
+    get_cross_function_interference_hypothesis,
+    get_los_probability_hypothesis,
+)
 from parameter_evidence import (
     PARAMETER_EVIDENCE,
     PROFILE_BOUNDS,
@@ -314,6 +318,12 @@ def load_calibrated_profile(path):
     calibration_noise_id = selection.get("calibration_noise_hypothesis_id")
     if calibration_noise_id != "description_literal_target_matches_ue":
         raise ValueError("Profile has no valid calibration noise hypothesis")
+    los_probability_id = selection.get("los_probability_hypothesis_id")
+    get_los_probability_hypothesis(los_probability_id)
+    cross_interference_id = selection.get(
+        "cross_function_interference_hypothesis_id"
+    )
+    get_cross_function_interference_hypothesis(cross_interference_id)
     fixed_values = selection.get("fixed_sensitivity_values", {})
     if not isinstance(fixed_values, Mapping):
         raise ValueError("Profile fixed sensitivities must be an object")
@@ -371,6 +381,9 @@ def load_calibrated_profile(path):
         or not any(
             item.get("hypothesis_id") == hypothesis_id
             and item.get("fully_feasible") is True
+            and item.get("calibration_admissible") is True
+            and item.get("ordering_violations") == 0
+            and item.get("power_direction_violations") == 0
             for item in candidate_scores
         )
     ):
@@ -390,6 +403,17 @@ def load_calibrated_profile(path):
         raise ValueError("Calibration report uses a different power hypothesis")
     if report.get("calibration_noise_hypothesis_id") != calibration_noise_id:
         raise ValueError("Calibration report uses a different noise hypothesis")
+    if report.get("los_probability_hypothesis_id") != los_probability_id:
+        raise ValueError(
+            "Calibration report uses a different LoS probability hypothesis"
+        )
+    if report.get("cross_function_interference_hypothesis_id") != (
+        cross_interference_id
+    ):
+        raise ValueError(
+            "Calibration report uses a different cross-function interference "
+            "hypothesis"
+        )
     if report.get("fixed_sensitivity_values", {}) != dict(fixed_values):
         raise ValueError("Calibration report fixed sensitivities do not match")
     if report.get("fixed_sensitivity_protocol") != fixed_protocol:
@@ -499,6 +523,22 @@ def _expanded_values(profile, cfg_obj=cfg):
             "PT_dBW": metadata["power_dbw"],
             "power_hypothesis_metadata": metadata,
         })
+    los_probability_id = profile.selection.get(
+        "los_probability_hypothesis_id"
+    )
+    if los_probability_id is not None:
+        values["los_probability_hypothesis_id"] = (
+            get_los_probability_hypothesis(los_probability_id).identifier
+        )
+    cross_interference_id = profile.selection.get(
+        "cross_function_interference_hypothesis_id"
+    )
+    if cross_interference_id is not None:
+        values["cross_function_interference_hypothesis_id"] = (
+            get_cross_function_interference_hypothesis(
+                cross_interference_id
+            ).identifier
+        )
     if "fc" in values:
         values["wavelength"] = 3e8 / values["fc"]
     if "v_max" in values:

@@ -544,11 +544,26 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
             "cross_objective_dtl_diagnostic": (cross_target, cross_path),
             "ddpg_scratch": (scratch, scratch_path),
         }
+        anchor_tail_fraction = 0.2
+        anchor_tail_minimum = 100
+        anchor_lower_quantile = 0.05
+        anchor_upper_quantile = 0.95
         for trained, _path in scalar_methods.values():
             values = np.column_stack(
                 [trained["comm_rates"], trained["sensing_rates"]]
             )
-            anchors.update_training(values)
+            tail_count = min(
+                values.shape[0],
+                max(
+                    anchor_tail_minimum,
+                    int(np.ceil(anchor_tail_fraction * values.shape[0])),
+                ),
+            )
+            anchors.update_training(
+                values[-tail_count:],
+                lower_quantile=anchor_lower_quantile,
+                upper_quantile=anchor_upper_quantile,
+            )
         scalar_records.append({
             "seed": int(seed),
             "joint_source_checkpoint": str(joint_source_path.relative_to(output)),
@@ -569,6 +584,11 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
 
     anchor_provenance = {
         "partition": "training_only",
+        "estimator": "per-method converged-tail quantiles",
+        "tail_fraction": 0.2,
+        "tail_minimum_episodes": 100,
+        "lower_quantile": 0.05,
+        "upper_quantile": 0.95,
         "research_seeds": manifest["research_seeds"],
         "source_methods": [
             "same_objective_dtl", "cross_objective_dtl_diagnostic", "ddpg_scratch"
@@ -583,6 +603,7 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
     anchor_lock = {
         "schema_version": 1,
         "anchors": anchors.state_dict(),
+        "anchor_digest": anchors.digest(),
         "normalized_hypervolume_reference": manifest[
             "hypervolume_reference_normalized"
         ],
@@ -1037,6 +1058,7 @@ def _ba_identity(
     residual_radius,
     transfer_trunks,
     anchor_enabled,
+    anchor_digest,
 ):
     return {
         "run_id": f"{method}-seed-{int(seed)}",
@@ -1059,6 +1081,7 @@ def _ba_identity(
         "residual_scales": manifest["residual_scales"],
         "transfer_trunks": bool(transfer_trunks),
         "anchor_enabled": bool(anchor_enabled),
+        "anchor_digest": str(anchor_digest),
     }
 
 
@@ -1110,6 +1133,7 @@ def _train_vector_method(
         radius,
         transfer_trunks,
         anchor_enabled,
+        agent.anchors.digest(),
     )
     trained = train_ba_pcdtl(
         agent,

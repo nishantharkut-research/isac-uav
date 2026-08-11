@@ -247,7 +247,6 @@ PROFILE_KEYS = frozenset({
 STRUCTURAL_IDENTIFICATION_KEYS = frozenset({
     "omega_0", "rho_br", "rho_rt", "zeta_los", "zeta_nlos",
     "ue_x_min", "ue_x_max", "ue_y_min", "ue_y_max",
-    "R_min", "Psi_max", "P_a_max",
 })
 SENSITIVITY_ONLY_KEYS = PROFILE_KEYS - STRUCTURAL_IDENTIFICATION_KEYS
 

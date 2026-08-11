@@ -9,6 +9,7 @@ from experiment_protocol import (
     final_window_mean,
     physical_configuration_fingerprint,
     resolve_required_checkpoint,
+    write_immutable_json,
 )
 
 
@@ -90,6 +91,15 @@ class ExperimentProtocolTests(unittest.TestCase):
             }), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "completed run manifest"):
                 resolve_required_checkpoint(run_directory, "checkpoints/source.pt")
+
+    def test_immutable_json_is_idempotent_and_rejects_changed_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lock.json"
+            payload = {"schema_version": 1, "value": [1, 2, 3]}
+            write_immutable_json(path, payload)
+            write_immutable_json(path, copy.deepcopy(payload))
+            with self.assertRaisesRegex(ValueError, "Immutable JSON"):
+                write_immutable_json(path, {**payload, "value": [3, 2, 1]})
 
 
 if __name__ == "__main__":
