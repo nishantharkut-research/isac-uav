@@ -8,6 +8,7 @@ from ddpg_agent import DDPGAgent
 from pareto_agent import (
     BAPCDTLAgent,
     componentwise_bellman_target,
+    remaining_discount_scale_from_state,
     scalarize_q_tensor,
 )
 from pareto_protocol import ParetoAnchors
@@ -104,12 +105,35 @@ class BAPCDTLUpdateTests(unittest.TestCase):
         torch.testing.assert_close(target[0], torch.tensor([6.0, 14.5]))
         torch.testing.assert_close(target[1], reward[1])
 
-    def test_tensor_scalarization_keeps_png_physical_and_chebyshev_separate(self):
+    def test_tensor_scalarization_keeps_exact_png_argmax_and_comparable_units(self):
         q_values = torch.tensor([[2.0, 5.0], [3.0, 6.0]])
         preferences = torch.tensor([[0.5, 0.5], [0.25, 0.75]])
         values = scalarize_q_tensor(q_values, preferences, _frozen_anchors())
-        self.assertEqual(float(values[0]), 7.0)
-        self.assertNotEqual(float(values[1]), 9.0)
+        self.assertAlmostEqual(float(values[0]), 0.7, places=6)
+        self.assertLess(abs(float(values[0]) - float(values[1])), 2.0)
+
+    def test_remaining_discount_scale_uses_each_sample_time_feature(self):
+        states = torch.tensor([
+            [0.0, 9.0],
+            [0.5, 9.0],
+            [1.0, 9.0],
+        ])
+        scales = remaining_discount_scale_from_state(
+            states, time_feature_index=0, gamma=0.9, horizon=300
+        )
+
+        self.assertEqual(float(scales[-1]), 1.0)
+        self.assertGreater(float(scales[0]), float(scales[1]))
+        self.assertGreater(float(scales[1]), float(scales[2]))
+
+    def test_chebyshev_converts_discounted_returns_to_anchor_rate_units(self):
+        value = scalarize_q_tensor(
+            torch.tensor([[50.0, 80.0]]),
+            torch.tensor([[1.0, 0.0]]),
+            _frozen_anchors(),
+            critic_return_scale=10.0,
+        )
+        torch.testing.assert_close(value, torch.tensor([1.05]))
 
     def test_update_and_exact_training_state_round_trip(self):
         torch.manual_seed(9)
@@ -160,6 +184,24 @@ class BAPCDTLUpdateTests(unittest.TestCase):
         state["baseline_policy_digest"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "baseline"):
             agent.load_training_state_dict(state)
+
+    def test_restore_rejects_different_pareto_anchors(self):
+        baseline = DDPGAgent(4, 2)
+        source = BAPCDTLAgent(
+            baseline, 4, 2, replay_capacity=4, batch_size=2,
+            anchors=_frozen_anchors(),
+        )
+        state = source.training_state_dict()
+
+        different = ParetoAnchors()
+        different.update_training([[0.0, 1.0], [7.0, 9.0]])
+        different.freeze({"partition": "different_training_data"})
+        target = BAPCDTLAgent(
+            baseline, 4, 2, replay_capacity=4, batch_size=2,
+            anchors=different,
+        )
+        with self.assertRaisesRegex(ValueError, "contract|anchor"):
+            target.load_training_state_dict(state)
 
 
 if __name__ == "__main__":

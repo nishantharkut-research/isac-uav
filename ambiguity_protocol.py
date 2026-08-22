@@ -6,12 +6,22 @@ import numpy as np
 
 from ambiguity_hypotheses import (
     DDPG_COMPARATOR_CSI_HYPOTHESES,
+    CHANNEL_COHERENCE_HYPOTHESES,
+    CSI_OBSERVATION_HYPOTHESES,
+    RATE_MODEL_HYPOTHESES,
+    CROSS_FUNCTION_INTERFERENCE_HYPOTHESES,
+    LOS_PROBABILITY_HYPOTHESES,
     NOISE_HYPOTHESES,
     PRIMARY_NOISE_HYPOTHESIS_ID,
     PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID,
     PRIMARY_TRANSFER_UPDATE_HYPOTHESIS_ID,
     PRIMARY_WFB_HYPOTHESIS_ID,
     PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+    PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+    PRIMARY_CSI_OBSERVATION_HYPOTHESIS_ID,
+    PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
+    PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
+    PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
     TRANSFER_SCHEDULE_HYPOTHESES,
     TRANSFER_UPDATE_HYPOTHESES,
     WFB_HYPOTHESES,
@@ -21,13 +31,22 @@ from ambiguity_hypotheses import (
 SENSITIVITY_SCHEMA_VERSION = 1
 
 
-def _hypotheses(noise, update, schedule, wfb, ddpg_comparator_csi):
+def _hypotheses(noise, update, schedule, wfb, ddpg_comparator_csi,
+                 los_probability, channel_coherence,
+                 csi_observation,
+                 rate_model,
+                 cross_function_interference):
     return {
         "noise": noise,
         "transfer_update": update,
         "transfer_schedule": schedule,
         "wfb": wfb,
         "ddpg_comparator_csi": ddpg_comparator_csi,
+        "los_probability": los_probability,
+        "channel_coherence": channel_coherence,
+        "csi_observation": csi_observation,
+        "rate_model": rate_model,
+        "cross_function_interference": cross_function_interference,
     }
 
 
@@ -38,6 +57,11 @@ def _primary():
         PRIMARY_TRANSFER_SCHEDULE_HYPOTHESIS_ID,
         PRIMARY_WFB_HYPOTHESIS_ID,
         PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
+        PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+        PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+        PRIMARY_CSI_OBSERVATION_HYPOTHESIS_ID,
+        PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
+        PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
     )
 
 
@@ -45,6 +69,14 @@ def build_sensitivity_plan(design="one_at_a_time"):
     """Build a result-independent sensitivity matrix."""
     if design == "one_at_a_time":
         primary = _primary()
+        alternate_los = next(
+            key for key in LOS_PROBABILITY_HYPOTHESES
+            if key != PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID
+        )
+        alternate_coherence = next(
+            key for key in CHANNEL_COHERENCE_HYPOTHESES
+            if key != PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID
+        )
         scenarios = [
             {"id": "primary", "hypotheses": dict(primary)},
             {
@@ -54,11 +86,19 @@ def build_sensitivity_plan(design="one_at_a_time"):
                 },
             },
             {
-                "id": "transfer_next_state",
+                "id": "transfer_current_q_bellman",
                 "hypotheses": {
                     **primary,
                     "transfer_update":
-                        "eq30_next_state_continuation_blend",
+                        "eq30_current_q_bellman_blend",
+                },
+            },
+            {
+                "id": "transfer_literal_current_q",
+                "hypotheses": {
+                    **primary,
+                    "transfer_update":
+                        "eq30_literal_current_q_blend",
                 },
             },
             {
@@ -82,6 +122,43 @@ def build_sensitivity_plan(design="one_at_a_time"):
                     "ddpg_comparator_csi": "icsi_comparator",
                 },
             },
+            {
+                "id": "los_standard_mapped_roles",
+                "hypotheses": {
+                    **primary,
+                    "los_probability": alternate_los,
+                },
+            },
+            {
+                "id": "episode_block_fading",
+                "hypotheses": {
+                    **primary,
+                    "channel_coherence": alternate_coherence,
+                },
+            },
+            {
+                "id": "icsi_statistical_observation",
+                "hypotheses": {
+                    **primary,
+                    "csi_observation":
+                        "pcsi_instantaneous_icsi_statistical",
+                },
+            },
+            {
+                "id": "paper_split_rate_models",
+                "hypotheses": {
+                    **primary,
+                    "rate_model": "paper_split_scalar_pcsi_matrix_icsi",
+                },
+            },
+            {
+                "id": "receiver_consistent_cross_interference",
+                "hypotheses": {
+                    **primary,
+                    "cross_function_interference":
+                        "receiver_consistent_cross_channels",
+                },
+            },
         ]
     elif design == "full_factorial":
         scenarios = []
@@ -90,7 +167,12 @@ def build_sensitivity_plan(design="one_at_a_time"):
                 TRANSFER_UPDATE_HYPOTHESES,
                 TRANSFER_SCHEDULE_HYPOTHESES,
                 WFB_HYPOTHESES,
-                DDPG_COMPARATOR_CSI_HYPOTHESES)):
+                DDPG_COMPARATOR_CSI_HYPOTHESES,
+                LOS_PROBABILITY_HYPOTHESES,
+                CHANNEL_COHERENCE_HYPOTHESES,
+                CSI_OBSERVATION_HYPOTHESES,
+                RATE_MODEL_HYPOTHESES,
+                CROSS_FUNCTION_INTERFERENCE_HYPOTHESES)):
             hypotheses = _hypotheses(*combination)
             identifier = (
                 "primary" if hypotheses == _primary()
@@ -151,6 +233,13 @@ def build_sensitivity_report(plan, summaries):
             "wfb_hypothesis_id": hypotheses["wfb"],
             "ddpg_comparator_csi_hypothesis_id":
                 hypotheses["ddpg_comparator_csi"],
+            "los_probability_hypothesis_id": hypotheses["los_probability"],
+            "channel_coherence_hypothesis_id":
+                hypotheses["channel_coherence"],
+            "csi_observation_hypothesis_id": hypotheses["csi_observation"],
+            "rate_model_hypothesis_id": hypotheses["rate_model"],
+            "cross_function_interference_hypothesis_id":
+                hypotheses["cross_function_interference"],
         }
         if any(
             summary.get(key) != value

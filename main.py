@@ -26,8 +26,8 @@ def _parse_args():
         help="Ignore and replace existing checkpoints instead of resuming",
     )
     parser.add_argument(
-        "--checkpoint-every", type=int, default=10, metavar="EPISODES",
-        help="Atomically checkpoint every N completed episodes (default: 10)",
+        "--checkpoint-every", type=int, default=1, metavar="EPISODES",
+        help="Atomically checkpoint every N completed episodes (default: 1)",
     )
     return parser.parse_args()
 

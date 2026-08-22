@@ -17,6 +17,20 @@ from ambiguity_hypotheses import apply_ambiguity_hypotheses
 from config import cfg
 
 
+def _ao_result(sum_rate=7.0, feasible=True):
+    return {
+        "sum_rate": float(sum_rate),
+        "is_feasible": bool(feasible),
+        "solver_identity": (
+            "fixed_geometry_scipy_ao_surrogate_terminal_iterate_"
+            "not_author_algorithms_2_3"
+        ),
+        "trajectory_mode": "fixed_geometry",
+        "selection": "terminal_iterate",
+        "beam_direction_method": "zf_and_matched_filter",
+    }
+
+
 class CalibrationProtocolTests(unittest.TestCase):
     def test_fixed_sensitivity_parser_accepts_only_sensitivity_parameters(self):
         values = parse_fixed_sensitivity_values([
@@ -153,10 +167,14 @@ class CalibrationProtocolTests(unittest.TestCase):
             "selection": {},
         })
         seen_sigma2 = []
+        seen_systems = []
 
         def fake_run_ao(*args, **kwargs):
             seen_sigma2.append(float(kwargs["sigma2"]))
-            return {"sum_rate": 7.0, "is_feasible": True}
+            seen_systems.append(
+                (cfg.M, cfg.N, cfg.U, cfg.K, cfg.L, cfg.La, cfg.Lp)
+            )
+            return _ao_result()
 
         with patch("ao_optimizer.run_ao", side_effect=fake_run_ao):
             predictor = make_ao_calibration_predictor(
@@ -169,6 +187,7 @@ class CalibrationProtocolTests(unittest.TestCase):
         self.assertEqual(len(seen_sigma2), 10)
         self.assertTrue(all(value == 0.0 for value in seen_sigma2[:5]))
         self.assertTrue(all(value > 0.0 for value in seen_sigma2[5:]))
+        self.assertEqual(set(seen_systems), {(4, 2, 3, 3, 20, 10, 10)})
 
     def test_ao_predictor_rejects_infeasible_solver_result(self):
         profile = profile_from_mapping({
@@ -203,7 +222,7 @@ class CalibrationProtocolTests(unittest.TestCase):
         def fake_run_ao(*args, **kwargs):
             from config import cfg
             seen_power.append(float(cfg.PT))
-            return {"sum_rate": 7.0, "is_feasible": True}
+            return _ao_result()
 
         with patch("ao_optimizer.run_ao", side_effect=fake_run_ao):
             predictor = make_ao_calibration_predictor(
@@ -232,8 +251,12 @@ class CalibrationProtocolTests(unittest.TestCase):
         seen = []
 
         def fake_run_ao(*args, **kwargs):
-            seen.append((cfg.noise_hypothesis_id, cfg.sigma2_k_dBm))
-            return {"sum_rate": 7.0, "is_feasible": True}
+            seen.append((
+                cfg.noise_hypothesis_id,
+                cfg.sigma2_k_dBm,
+                cfg.rate_model_hypothesis_id,
+            ))
+            return _ao_result()
 
         try:
             with patch("ao_optimizer.run_ao", side_effect=fake_run_ao):
@@ -243,7 +266,9 @@ class CalibrationProtocolTests(unittest.TestCase):
                 predictor({"omega_0": 1e-3})
             self.assertTrue(seen)
             self.assertTrue(all(item == (
-                "description_literal_target_matches_ue", -94.0
+                "description_literal_target_matches_ue",
+                -94.0,
+                "continuous_matrix_scee_all_csi_qualities",
             ) for item in seen))
             self.assertEqual(cfg.noise_hypothesis_id,
                              "dual_minus70_conservative")

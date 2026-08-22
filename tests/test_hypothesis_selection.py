@@ -69,6 +69,9 @@ class HypothesisSelectionTests(unittest.TestCase):
         self.assertEqual(score["ordering_violations"], 0)
         self.assertEqual(score["normalized_curve_error"], 0.0)
         self.assertEqual(score["normalized_slope_error"], 0.0)
+        self.assertEqual(score["power_direction_violations"], 0)
+        self.assertEqual(score["minimum_power_response_ratio"], 1.0)
+        self.assertTrue(score["calibration_admissible"])
         self.assertTrue(score["fully_feasible"])
 
     def test_holdout_usage_is_rejected(self):
@@ -97,6 +100,34 @@ class HypothesisSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exactly"):
             select_power_hypothesis(
                 [candidate("paper_db_as_dbm")], reference_fixture()
+            )
+
+    def test_all_ordering_violations_fail_instead_of_selecting_broken_model(self):
+        left = candidate("paper_db_as_dbm")
+        right = candidate("paper_db_as_dbw", offset=0.2)
+        for item in (left, right):
+            item["predictions"]["6"]["AO-pCSI"] = [5.0, 6.0, 7.0]
+            item["predictions"]["6"]["AO-iCSI"] = [6.0, 7.0, 8.0]
+        with self.assertRaisesRegex(ValueError, "physical-ordering"):
+            select_power_hypothesis([left, right], reference_fixture())
+
+    def test_flat_power_response_fails_before_training(self):
+        left = candidate("paper_db_as_dbm")
+        right = candidate("paper_db_as_dbw")
+        for item in (left, right):
+            item["predictions"]["6"]["AO-pCSI"] = [8.0, 8.0, 8.0]
+            item["predictions"]["6"]["AO-iCSI"] = [7.0, 7.0, 7.0]
+        with self.assertRaisesRegex(ValueError, "calibration-fidelity"):
+            select_power_hypothesis([left, right], reference_fixture())
+
+    def test_large_curve_offset_fails_before_training(self):
+        with self.assertRaisesRegex(ValueError, "calibration-fidelity"):
+            select_power_hypothesis(
+                [
+                    candidate("paper_db_as_dbm", offset=3.0),
+                    candidate("paper_db_as_dbw", offset=4.0),
+                ],
+                reference_fixture(),
             )
 
     def test_lock_cannot_be_overwritten_with_different_selection(self):

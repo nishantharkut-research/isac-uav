@@ -6,8 +6,8 @@ This package supports two sequential studies:
 
 1. **Journal reproduction:** communication sum-rate maximization with sensing
    rate and physical constraints.
-2. **Research extension:** exact joint communication-sensing optimization with
-   BA-PCDTL and paired Pareto evaluation.
+2. **Research extension:** joint communication-sensing objective optimization
+   with BA-PCDTL and paired Pareto evaluation.
 
 The package contains source code, tests, the paper PDF, the supplied problem
 PNG, profiles, and documentation. It contains no accepted trained result.
@@ -23,17 +23,42 @@ corresponding validators return exit code `0`.
 - Per-UE and per-target floors remain hard constraints.
 - Phase, active gain, BS power, active-HRIS power, passive cascade, UAV bounds,
   UAV step, and UAV closure remain hard physical constraints.
-- Replay stores the action executed after hard feasibility projection.
+- Replay stores the executed physical action returned by the environment. This
+  keeps critic targets on the same action that produced the recorded reward.
+  Each step exposes the raw proposal in its in-memory diagnostic record; saved
+  result summaries retain aggregate projection/recovery evidence rather than
+  every proposal vector.
+- Evaluation reports action-projection rate, mean retained-action fraction,
+  deterministic-recovery rate, and allocation-fallback rate separately from
+  post-projection physical feasibility.
 - Every transition checks UAV return reachability and exact final-slot closure.
   A failed proposal is recovered deterministically on the same sampled channel;
   neither channel nor scene is resampled to obtain a better result.
-- Publication evaluation uses the SciPy constrained stream-power allocator.
-- Training uses the deterministic global fast grid first and retries SciPy on
-  the same channel/control when fast allocation alone cannot establish
-  feasibility. Previous stream powers are warm starts only.
+- Training, validation, and test rollouts use the same allocator contract: a
+  deterministic global fast grid first, followed by a SciPy retry on the same
+  channel/control only when the fast pass cannot establish feasibility.
+  Previous stream powers are warm starts only.
 - Test scenes never select a model, normalizer, gate parameter, preference, or
   hyperparameter.
 - A larger plotted curve alone is not evidence of improvement.
+- Equation (16c) is evaluated as the sum of the per-element squared Frobenius
+  norms. The paper omits the communication-user index, so the worst-user value
+  is enforced.
+- The primary observation contract exposes estimated primitive channel tensors
+  rather than phase-dependent composites. With zero NMSE, pCSI estimates equal
+  the generated channel; iCSI uses nonzero-NMSE estimates; ParCSI masks a fixed
+  subset. The observation includes the absolute scale used to normalize those
+  tensors, so normalization does not hide SINR-relevant channel magnitude.
+  Treating iCSI as a statistical state without channel coefficients is retained
+  as a report-all sensitivity.
+- The state also includes normalized slot time, UE/target geometry, and target
+  velocity, so finite-horizon motion and return reachability are observable.
+- The primary implements Eq. (9)'s active rectangular subarray exactly and
+  places disjoint active/passive rectangular subarrays on one physical HRIS
+  aperture. Uniform interleaving is retained only as a sensitivity.
+- Result acceptance fails when projection dominates the policy: maximum action
+  projection rate `0.10`, maximum deterministic-recovery rate `0.01`, and
+  minimum mean retained-action fraction `0.95`.
 
 No neural method can guarantee strict improvement on unseen stochastic
 channels. The code therefore uses a fail-closed statistical acceptance rule
@@ -52,15 +77,19 @@ communication-sensing weights. BA-PCDTL adds the following algorithmic layer:
 - communication-trunk transfer without copying a communication scalar into the
   sensing output;
 - deterministic Sobol preference relabeling;
-- unnormalized `Q_comm + Q_sense` actor updates for the exact PNG point;
+- finite-horizon rate-equivalent `Q_comm + Q_sense` actor updates for the exact
+  PNG point, divided only by a frozen positive span so the argmax is unchanged;
 - frozen-anchor Chebyshev scalarization for non-PNG Pareto preferences;
-- a current-state critic lower-confidence gate with baseline fallback;
+- a current-state deterministic conservative ensemble-score gate with baseline
+  fallback;
 - validation-only gate selection and an immutable lock before test evaluation;
 - fair same-objective, scratch, independent-policy, and ablation comparisons.
 
-The conservative gate is a neural decision rule, not a theorem about the true
-return. Nonfinite estimates or insufficient conservative advantage execute the
-frozen baseline proposal.
+The conservative score is the ensemble mean minus a locked multiple of ensemble
+spread. It is a deterministic neural heuristic, not a calibrated confidence
+bound or theorem about the true return. At action selection, nonfinite estimates
+or insufficient conservative advantage execute the frozen baseline proposal;
+this fallback does not terminate training.
 
 ## 4. Installation
 
@@ -77,6 +106,13 @@ python -m pip install -r requirements.txt
 SciPy is required. It supplies constrained allocation, statistical tests, and
 the deterministic Sobol preference sequence.
 
+All publication commands are content-bound to
+`references\paper_reference_curves.json`. Do not replace its digitized values;
+a schema-valid but modified reference file is rejected.
+Dry runs perform the same calibrated-profile/report/lock authority checks as
+real runs, so a successful dry run is meaningful preparation for removing
+`--dry-run` from the otherwise identical command.
+
 Run source verification. These commands do not start DRL training.
 
 ```powershell
@@ -86,9 +122,11 @@ python -m compileall -q .
 
 Do not continue if either command fails.
 
-This source tree has its own immutable digest. Do not copy checkpoints or result
-folders from an older package into these `runs` directories. Any source change
-requires new baseline and extension runs.
+This source tree has its own immutable digest. Preparation, calibration,
+checkpoints, and results are bound to it and old artifacts fail validation.
+Do not copy result folders from an older package into these `runs` directories.
+Any executable source change requires fresh preparation, calibration, baseline,
+and extension runs.
 
 ## 5. Prepare Omitted Parameters
 
@@ -118,6 +156,12 @@ The paper labels transmitter power in `dB` without stating dBm or dBW. The code
 evaluates both predeclared interpretations on Figure 6 calibration data and
 locks the feasible branch before any holdout or RL result is viewed.
 
+Calibration runs with `M=4`, `N=2`, `U=K=3`, and `L=20`. The first four values
+come from Table III and `L=20` comes from the Figure 6 text. The paper's general
+`La=20` statement conflicts with `L=20` and the stated `La <= Lp` constraint, so
+the executable Figure 6 contract declares the feasible equal split
+`La=Lp=10`. This is an assumption, not a reported author value.
+
 ```powershell
 python calibrate_reproduction.py `
   --base-profile runs\01_prepared\identified_profile.json `
@@ -139,6 +183,17 @@ $profile
 ```
 
 Do not switch the locked branch after inspecting another result.
+
+Calibration fails instead of writing a selection lock when neither branch has
+the required pCSI/iCSI ordering, monotone power direction, at least half the
+paper's total power response, and curve RMSE within three declared digitization
+uncertainty units. With Figure 6 uncertainty `0.08 bits/s/Hz`, this is a
+`0.24 bits/s/Hz` RMSE ceiling. A failure here is a model-identification failure;
+do not proceed to training.
+
+The calibration solver is the disclosed constrained SciPy AO surrogate. It is
+not the authors' unpublished CVX/SCA implementation of Algorithms 2-3, and the
+solver identity is bound into the profile, report, and selection lock.
 
 For an omitted-parameter sensitivity branch, repeat the complete calibration in
 a new empty output directory and fix the value before any simulated curve is
@@ -194,6 +249,30 @@ python run_baseline.py `
   --dry-run
 ```
 
+Optional early diagnostic run, using the same physics, reward, replay,
+projection, allocator, and checkpoint contracts:
+
+```powershell
+python run_baseline.py `
+  --profile $profile `
+  --output runs\03_smoke_100 `
+  --seeds 2025 `
+  --run-mode smoke `
+  --episodes 100 `
+  --eval-episodes 2 `
+  --checkpoint-every 1
+```
+
+Smoke mode accepts exactly `100` or `200` episodes. It is useful for detecting
+nonfinite learning, extreme projection dependence, checkpoint/resume failures,
+or obviously flat action response before committing compute. It is explicitly
+`publication_eligible=false`: its reward level or trend is not Figure 4
+evidence and must not be used to tune paper-acceptance thresholds. It is a
+separate run and cannot be promoted into the publication run. Diagnostic status
+is advisory: weak reward trends never stop the run. Progress is printed every
+25 episodes. The publication command can also be interrupted manually after an
+episode checkpoint and resumed with the exact same command and output path.
+
 Then rerun without `--dry-run`:
 
 ```powershell
@@ -205,6 +284,11 @@ python run_baseline.py `
   --eval-episodes 5 `
   --checkpoint-every 1
 ```
+
+Before the first training checkpoint is created, this command records a bounded
+no-training physical diagnostic on three deterministic scenes. It reports
+feasibility and the communication response across gain/phase actions. The
+diagnostic is advisory-only and never stops training because of a weak response.
 
 Validate the complete raw baseline:
 
@@ -281,11 +365,15 @@ quantitative acceptance. The holdout runner is a long training/optimization
 workflow; it checkpoints each declared unit and never chooses a scenario from
 its observed result.
 
-The paper does not provide the authors' CVX implementation or every auxiliary
-matrix needed to reproduce Algorithms 2-3 byte-for-byte. The bundled AO method
-is a disclosed constrained SciPy surrogate with a one-step trajectory block.
-A passing holdout means its generated curves agree with the declared paper
-tolerances; it does not claim recovery of unpublished author source code.
+The paper does not provide the authors' CVX implementation or every executable
+detail needed to reconstruct Algorithms 2-3. The bundled AO method is a
+disclosed fixed-geometry constrained SciPy surrogate: it constructs
+ZF/matched-filter beam directions, optimizes stream powers and HRIS controls,
+and reports the terminal iterate.
+It is not an implementation of the paper's full MMSE/CVX/SCA alternating
+optimizer. A passing holdout means this declared surrogate agrees with the
+digitized curves within the locked tolerances; it does not prove equivalence to
+the unpublished author solver.
 
 ## 10. Inspect the BA-PCDTL Plan Without Training
 
@@ -340,9 +428,21 @@ Primary mode trains:
 - full BA-PCDTL;
 - BA-PCDTL evaluation with and without its gate.
 
-It freezes global Pareto anchors from scalar-comparator training data, evaluates
-the preregistered gate grid only on validation scenes, writes
+It freezes global rate-unit Pareto anchors from the scalar-comparator final
+training tails using locked 5th/95th quantiles. Vector critic returns are mapped
+back to rate-equivalent units before non-balanced Chebyshev scalarization; the
+balanced PNG actor objective divides physical `Q_c + Q_s` only by one frozen
+positive joint span, preserving its exact action argmax while avoiding a unit
+mismatch with the other actor utilities. A
+hypervolume reference strictly below normalized physical zero is then locked
+before validation. The runner evaluates the complete preregistered gate grid
+only on validation scenes, writes
 `gate_selection_lock.json`, and opens test scenes only afterward.
+Every declared evaluation episode is executed and retained as nested raw
+evidence; it is not implemented by merely relabeling one rollout.
+The SHA-256-derived evaluation schedule pairs every method on the exact same
+scenes for a research seed, assigns disjoint scene blocks to different research
+seeds, and rejects overlap with environment or training seeds.
 The run manifest also locks SHA-256 hashes for every accepted baseline source
 and `DTL-pCSI` checkpoint and rechecks them on every restore.
 
@@ -410,6 +510,8 @@ Preliminary acceptance requires:
 - exact PNG objective identity;
 - `100%` physical feasibility and every UE/target floor satisfied;
 - unchanged checkpoint, baseline, anchor, and gate-lock provenance;
+- complete finite projection-dependence arrays in `[0, 1]` for every policy,
+  preference, seed, and test scene;
 - a strictly positive lower bound of the paired 95% confidence interval for
   BA-PCDTL minus same-objective DTL joint rate;
 - a strictly positive lower bound of the paired 95% confidence interval for
@@ -418,7 +520,9 @@ Preliminary acceptance requires:
 
 Publication acceptance additionally requires the complete fair independent
 policy grid and a strictly positive paired 95% confidence-interval lower bound
-for normalized Pareto hypervolume improvement.
+for normalized Pareto hypervolume improvement. That hypervolume comparison uses
+ungated BA-PCDTL against ungated independent policies; the locked gate is
+evaluated separately as the deployable baseline-fallback system.
 
 ## 14. Plot Hashed Evidence
 
@@ -453,18 +557,28 @@ Each episode-boundary checkpoint stores:
 
 - actor, target actor, every critic, and target critic;
 - optimizer states;
-- vector replay transitions and executed actions;
+- executed-physical-action replay transitions and aggregate projection evidence;
 - frozen baseline actor and its digest;
 - Pareto anchors and provenance;
+- the canonical Pareto-anchor digest in both agent and run identity;
 - Sobol sequence seed and position;
 - residual/gate/algorithm contract;
 - raw histories;
 - environment state;
 - Python, NumPy, Torch, and CUDA RNG states.
 
-Atomic replacement keeps the previous complete checkpoint if a write is
-interrupted. With `--checkpoint-every 1`, at most the current unfinished episode
-is repeated.
+Result validators do not trust only the `.pt` hash and identity sidecar. They
+open every completed checkpoint and require its internal identity, completed
+episode count, history keys, and finite raw histories to match the serialized
+result row exactly. DTL validation also recomputes the embedded source-network
+digest and requires it to equal the accepted source checkpoint.
+
+The temporary checkpoint is flushed before atomic replacement. Supported POSIX
+hosts also flush the parent directory entry. With `--checkpoint-every 1`, an
+interruption reuses the previous complete episode boundary, so at most one
+episode is repeated. No application can promise recovery from every storage
+device or filesystem failure; keep the run directory on reliable local storage
+and back it up between long experiment stages.
 
 The canonical reset control may be signal-infeasible and is recorded as such;
 reset has no reward and enters no replay transition. Every actual transition
@@ -528,11 +642,24 @@ python run_ambiguity_sensitivity.py `
   --primary-validation runs\03_baseline\baseline_validation.json
 ```
 
-This base-reproduction ambiguity study executes five isolated alternatives to
-the accepted primary: noise
-mapping, Equation 30 update, transfer schedule, WFB replacement, and DDPG iCSI.
-The report contains paired deltas and no selected winner. The optional
-`--design full_factorial` executes all 32 predeclared combinations.
+This base-reproduction ambiguity study executes eleven isolated alternatives to
+the accepted primary: noise mapping, two nonprimary Equation 30 integrations,
+transfer schedule, WFB replacement, DDPG iCSI, the standard Al-Hourani LoS role
+mapping, episode-block fading, statistical iCSI observation, the paper's
+literal scalar-pCSI/matrix-iCSI rate-functional split, and receiver-consistent
+cross-function interference. The primary Equation 30 implementation preserves
+the complete immediate reward and blends source/target next-state continuation
+values; literal current-Q blending is a sensitivity because it omits a complete
+reward-bearing Bellman update. The
+primary follows the printed unnumbered LoS formula and Algorithm 1's
+per-time-step channel sampling. Each action is
+evaluated on the primitive-channel realization exposed by its state. Executed
+UAV/target motion defines the next geometry; the next realization and matching
+precoders are constructed atomically before the next instantaneous-CSI state is
+returned. On the terminal slot, no unmatched target/channel advance is made.
+The report contains
+paired deltas and no selected winner. The optional `--design full_factorial`
+executes all 1536 predeclared combinations and is substantially more expensive.
 
 ## 17. Legacy Sensitivity Modes
 
@@ -541,7 +668,8 @@ The report contains paired deltas and no selected winner. The optional
 - `png_joint_sum`: exact unweighted PNG objective, no `--retention` argument;
 - `comm_retention_sensing`: sensing objective with an explicitly declared
   retention fraction;
-- `normalized_pareto`: legacy fixed normalized weighting.
+- `normalized_pareto`: legacy fixed normalized weighting, where
+  `--pareto-weight` multiplies sensing and `1 - weight` multiplies communication.
 
 Example retention sensitivity:
 
@@ -562,15 +690,17 @@ must be labeled historical and is not the strongest publication comparator.
 ## 18. Failure Interpretation
 
 - **Baseline validation fails:** do not start or claim the extension.
-- **Source-tree mismatch:** regenerate the baseline with this exact package.
+- **Preparation/calibration source mismatch:** rerun preparation and calibration
+  in new empty directories before any baseline work.
+- **Baseline source-tree mismatch:** regenerate the baseline with this package.
 - **Checkpoint hash or identity mismatch:** restore the original payload or use
   a new output directory; do not edit the checkpoint.
 - **Same-channel recovery exhausted:** preserve proposal, previous-control, and
   deterministic-candidate diagnostics; do not resample the scene.
 - **Gate-lock mismatch:** test evidence is invalid and must not be combined.
 - **Rate-floor or feasibility failure:** the method fails the physical contract.
-- **Joint confidence interval crosses zero:** improvement over same-objective DTL
-  is not established.
+- **Joint confidence interval crosses zero:** improvement over the paired
+  communication-plus-sensing baseline is not established.
 - **Hypervolume confidence interval crosses zero:** publication-level Pareto
   improvement is not established.
 - **Nonfinite critic or result:** preserve the last checkpoint and diagnostic;

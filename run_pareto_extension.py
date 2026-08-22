@@ -12,8 +12,14 @@ from typing import Mapping
 import numpy as np
 
 from ambiguity_hypotheses import add_ambiguity_cli_arguments
+from experiment_protocol import (
+    PROJECTION_EVIDENCE_KEYS,
+    REPLAY_ACTION_SEMANTICS,
+    step_projection_evidence,
+)
 from pareto_agent import ALGORITHM_ID
 from pareto_protocol import hypervolume_2d, validate_preferences
+from validate_results import require_canonical_baseline_validation
 
 
 DEFAULT_PREFERENCE_GRID = (
@@ -33,7 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--test-scene-seeds", required=True)
     parser.add_argument("--episodes", type=int, default=1500)
     parser.add_argument("--eval-episodes", type=int, default=5)
-    parser.add_argument("--checkpoint-every", type=int, default=10)
+    parser.add_argument("--checkpoint-every", type=int, default=1)
     parser.add_argument("--preference-grid", default=DEFAULT_PREFERENCE_GRID)
     parser.add_argument("--comparison-level", choices=("primary", "full"), default="primary")
     parser.add_argument("--user-rate-min", type=float)
@@ -57,7 +63,9 @@ def _parse_integer_list(values, name: str) -> list[int]:
     return parsed
 
 
-def validate_seed_roles(research, validation, test) -> dict[str, list[int]]:
+def validate_seed_roles(
+        research, validation, test, *, effective_training_seeds=None
+) -> dict[str, list[int]]:
     roles = {
         "research": _parse_integer_list(research, "research seeds"),
         "validation": _parse_integer_list(validation, "validation scene seeds"),
@@ -71,6 +79,17 @@ def validate_seed_roles(research, validation, test) -> dict[str, list[int]]:
         overlap = set(roles[left]) & set(roles[right])
         if overlap:
             raise ValueError(f"Seed roles {left} and {right} overlap: {sorted(overlap)}.")
+    if effective_training_seeds is not None:
+        effective = set(_parse_integer_list(
+            effective_training_seeds, "effective training seeds"
+        ))
+        for role in ("validation", "test"):
+            overlap = effective & set(roles[role])
+            if overlap:
+                raise ValueError(
+                    f"{role} scenes overlap effective training scenes: "
+                    f"{sorted(overlap)}."
+                )
     return roles
 
 
@@ -119,7 +138,10 @@ def _load_json(path) -> dict:
 
 
 def require_accepted_baseline(validation: Mapping, baseline: Mapping) -> None:
-    from validate_results import result_payload_digest
+    from validate_results import (
+        require_canonical_baseline_validation,
+        result_payload_digest,
+    )
 
     if validation.get("validation") != "paper_baseline" or validation.get("overall_pass") is not True:
         raise ValueError("The baseline has not passed paper-baseline validation.")
@@ -221,7 +243,11 @@ def create_research_manifest(
                 "lower_fallback_rate", "lexicographic_parameters",
             ],
         },
-        "hypervolume_reference_normalized": [-1.0, -1.0],
+        "hypervolume_reference_rule": {
+            "physical_point_bits_per_second_per_hz": [0.0, 0.0],
+            "normalized_margin": 0.05,
+            "lock_partition": "training_only_before_validation",
+        },
     }
 
 
@@ -293,12 +319,25 @@ def _build_baseline_checkpoint_authority(
             raise ValueError(
                 "Accepted baseline checkpoint no longer matches its summary hash."
             )
+        from checkpointing import inspect_training_checkpoint
+        from source_integrity import source_model_state_digest
+
+        source_model_digest = source_model_state_digest(
+            inspect_training_checkpoint(source_path)["agent"]
+        )
+        if target_record.get("identity", {}).get(
+            "source_model_digest"
+        ) != source_model_digest:
+            raise ValueError(
+                "Accepted baseline DTL-pCSI is not linked to its source model."
+            )
         authority.append({
             "seed": int(record["seed"]),
             "source_checkpoint": str(source_relative),
             "source_checkpoint_sha256": source_digest,
             "dtl_pcsi_checkpoint": str(target_relative),
             "dtl_pcsi_checkpoint_sha256": target_digest,
+            "source_model_digest": source_model_digest,
         })
     return authority
 
@@ -312,11 +351,12 @@ def run(args) -> int:
     from config import cfg
     from experiment_protocol import (
         TRAINING_SEED_PROTOCOL,
+        derive_training_seed,
         ensure_run_directory,
         physical_configuration_fingerprint,
         resolve_required_checkpoint,
     )
-    from parameter_profiles import activate_profile, load_calibrated_profile, load_profile
+    from parameter_profiles import activate_profile, load_calibrated_profile
     from source_integrity import source_tree_digest
     from validate_results import result_payload_digest
 
@@ -334,12 +374,43 @@ def run(args) -> int:
     if args.episodes <= 0 or args.eval_episodes <= 0 or args.checkpoint_every <= 0:
         raise ValueError("Training, evaluation, and checkpoint budgets must be positive.")
 
-    profile = load_profile(args.profile) if args.dry_run else load_calibrated_profile(args.profile)
+    profile = load_calibrated_profile(args.profile)
     activate_profile(profile)
     apply_ambiguity_arguments(args, cfg)
     baseline = _load_json(args.baseline_summary)
     validation = _load_json(args.baseline_validation)
     require_accepted_baseline(validation, baseline)
+    require_canonical_baseline_validation(
+        baseline,
+        validation,
+        Path(args.baseline_summary).resolve().parent,
+    )
+    effective_training_seeds = set()
+    for record in baseline.get("seed_records", []):
+        seed = int(record["seed"])
+        effective_training_seeds.update({
+            int(record["source_seed"]),
+            int(record["target_seed"]),
+            int(record.get(
+                "source_training_seed", derive_training_seed(seed, "source")
+            )),
+            int(record.get(
+                "target_training_seed", derive_training_seed(seed, "target")
+            )),
+        })
+        effective_training_seeds.update(
+            _derive_research_seed(seed, role)
+            for role in (
+                "ba_pcdtl", "unanchored_vector_td3",
+                "anchored_random_trunks", "independent_weighted",
+            )
+        )
+    roles = validate_seed_roles(
+        args.research_seeds,
+        args.validation_scene_seeds,
+        args.test_scene_seeds,
+        effective_training_seeds=sorted(effective_training_seeds),
+    )
     require_matching_ambiguity_contract(baseline, cfg)
     physics = physical_configuration_fingerprint(profile.digest, cfg)
     tree_digest = source_tree_digest()
@@ -407,8 +478,12 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         derive_training_seed,
         resolve_required_checkpoint,
         serializable_training_result,
+        write_training_checkpoint_identity,
     )
-    from pareto_protocol import ParetoAnchors
+    from pareto_protocol import (
+        ParetoAnchors,
+        normalized_physical_zero_reference,
+    )
     from pareto_training import evaluate_preference_grid
     from research_objectives import ObjectiveSpec
     from simulation import train_ddpg, train_dtl
@@ -431,7 +506,10 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         int(row["seed"]): row for row in manifest["baseline_checkpoint_authority"]
     }
 
-    def environment(seed, objective_spec=objective, sigma2=0.0, allocation="fast"):
+    def environment(
+            seed, objective_spec=objective, sigma2=0.0,
+            allocation=cfg.policy_allocation_mode,
+    ):
         return HRISUAVISACEnv(
             sigma2_scee=float(sigma2),
             seed=int(seed),
@@ -544,19 +622,52 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
             "cross_objective_dtl_diagnostic": (cross_target, cross_path),
             "ddpg_scratch": (scratch, scratch_path),
         }
+        joint_source_authority = write_training_checkpoint_identity(
+            output, joint_source_path, joint_source["checkpoint_identity"]
+        )
+        scalar_method_authority = {
+            name: write_training_checkpoint_identity(
+                output, path, trained["checkpoint_identity"]
+            )
+            for name, (trained, path) in scalar_methods.items()
+        }
+        anchor_tail_fraction = 0.2
+        anchor_tail_minimum = 100
+        anchor_lower_quantile = 0.05
+        anchor_upper_quantile = 0.95
         for trained, _path in scalar_methods.values():
             values = np.column_stack(
                 [trained["comm_rates"], trained["sensing_rates"]]
             )
-            anchors.update_training(values)
+            tail_count = min(
+                values.shape[0],
+                max(
+                    anchor_tail_minimum,
+                    int(np.ceil(anchor_tail_fraction * values.shape[0])),
+                ),
+            )
+            anchors.update_training(
+                values[-tail_count:],
+                lower_quantile=anchor_lower_quantile,
+                upper_quantile=anchor_upper_quantile,
+            )
         scalar_records.append({
             "seed": int(seed),
-            "joint_source_checkpoint": str(joint_source_path.relative_to(output)),
-            "joint_source_checkpoint_sha256": _file_sha256(joint_source_path),
+            "joint_source_checkpoint": joint_source_authority["checkpoint"],
+            "joint_source_checkpoint_sha256": joint_source_authority[
+                "checkpoint_sha256"
+            ],
+            "joint_source_checkpoint_identity": joint_source_authority[
+                "checkpoint_identity"
+            ],
+            "joint_source_checkpoint_identity_sha256": joint_source_authority[
+                "checkpoint_identity_sha256"
+            ],
+            "joint_source_identity": joint_source_authority["identity"],
+            "joint_source_training": serializable_training_result(joint_source),
             "methods": {
                 name: {
-                    "checkpoint": str(path.relative_to(output)),
-                    "checkpoint_sha256": _file_sha256(path),
+                    **scalar_method_authority[name],
                     "training": serializable_training_result(trained),
                 }
                 for name, (trained, path) in scalar_methods.items()
@@ -569,6 +680,11 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
 
     anchor_provenance = {
         "partition": "training_only",
+        "estimator": "per-method converged-tail quantiles",
+        "tail_fraction": 0.2,
+        "tail_minimum_episodes": 100,
+        "lower_quantile": 0.05,
+        "upper_quantile": 0.95,
         "research_seeds": manifest["research_seeds"],
         "source_methods": [
             "same_objective_dtl", "cross_objective_dtl_diagnostic", "ddpg_scratch"
@@ -580,12 +696,17 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         ],
     }
     anchors.freeze(anchor_provenance)
+    reference_rule = manifest["hypervolume_reference_rule"]
+    hypervolume_reference = normalized_physical_zero_reference(
+        anchors,
+        margin=reference_rule["normalized_margin"],
+    ).tolist()
     anchor_lock = {
         "schema_version": 1,
         "anchors": anchors.state_dict(),
-        "normalized_hypervolume_reference": manifest[
-            "hypervolume_reference_normalized"
-        ],
+        "anchor_digest": anchors.digest(),
+        "hypervolume_reference_rule": reference_rule,
+        "normalized_hypervolume_reference": hypervolume_reference,
     }
     anchor_lock_path = write_immutable_json(
         output / "pareto_anchors_lock.json", anchor_lock
@@ -614,15 +735,9 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
             checkpoint_every=args.checkpoint_every,
         )
         methods = {
-            "ba_pcdtl": {
-                "checkpoint": proposed_training["checkpoint"],
-                "checkpoint_sha256": _file_sha256(
-                    output / proposed_training["checkpoint"]
-                ),
-                "baseline_policy_digest": proposed.baseline_policy_digest,
-                "identity": proposed_training["identity"],
-                "training": proposed_training["training"],
-            }
+            "ba_pcdtl": _vector_training_record(
+                proposed, proposed_training, output
+            )
         }
 
         if manifest["comparison_level"] == "full":
@@ -697,16 +812,17 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
                 raw = evaluate_preference_grid(
                     proposed,
                     environment_factory=lambda scene_seed: environment(
-                        scene_seed, objective, 0.0, "scipy"
+                        scene_seed, objective, 0.0, cfg.policy_allocation_mode
                     ),
                     scene_seeds=manifest["validation_scene_seeds"],
                     preferences=manifest["preference_grid"],
+                    evaluation_episodes=manifest["evaluation_episodes"],
                     use_gate=True,
                 )
                 metrics = _preference_grid_metrics(
                     raw,
                     anchors,
-                    manifest["hypervolume_reference_normalized"],
+                    hypervolume_reference,
                 )
                 validation_candidates.append({
                     "research_seed": int(seed),
@@ -734,6 +850,8 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         "validation_scene_seeds": manifest["validation_scene_seeds"],
         "research_seeds": manifest["research_seeds"],
         "anchors_sha256": anchor_lock_digest,
+        "gate_selection_grid": manifest["gate_selection_grid"],
+        "hypervolume_reference_normalized": hypervolume_reference,
         "rows": gate_validation_rows,
     }
     gate_validation_path = write_immutable_json(
@@ -746,6 +864,8 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         "validation_scene_seeds": manifest["validation_scene_seeds"],
         "research_seeds": manifest["research_seeds"],
         "anchors_sha256": anchor_lock_digest,
+        "gate_selection_grid": manifest["gate_selection_grid"],
+        "hypervolume_reference_normalized": hypervolume_reference,
         "validation_evidence_sha256": gate_validation_digest,
         "selected": selected_gate,
         "candidates": aggregated_candidates,
@@ -816,8 +936,11 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         test_methods = {
             name: _evaluate_scalar_agent(
                 agent,
-                lambda scene_seed: environment(scene_seed, objective, 0.0, "scipy"),
+                lambda scene_seed: environment(
+                    scene_seed, objective, 0.0, cfg.policy_allocation_mode
+                ),
                 manifest["test_scene_seeds"],
+                manifest["evaluation_episodes"],
             )
             for name, agent in scalar_agents.items()
         }
@@ -844,21 +967,23 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         proposed.gate_margin = selected_gate["margin"]
         proposed_test = evaluate_preference_grid(
             proposed,
-            lambda scene_seed: environment(scene_seed, objective, 0.0, "scipy"),
+            lambda scene_seed: environment(
+                scene_seed, objective, 0.0, cfg.policy_allocation_mode
+            ),
             manifest["test_scene_seeds"],
             manifest["preference_grid"],
+            evaluation_episodes=manifest["evaluation_episodes"],
             use_gate=True,
         )
-        proposed_test["gate_configuration"] = {
-            "uncertainty_coefficient": selected_gate["uncertainty_coefficient"],
-            "margin": selected_gate["margin"],
-        }
         test_methods["ba_pcdtl"] = proposed_test
         test_methods["ba_pcdtl_no_gate"] = evaluate_preference_grid(
             proposed,
-            lambda scene_seed: environment(scene_seed, objective, 0.0, "scipy"),
+            lambda scene_seed: environment(
+                scene_seed, objective, 0.0, cfg.policy_allocation_mode
+            ),
             manifest["test_scene_seeds"],
             manifest["preference_grid"],
+            evaluation_episodes=manifest["evaluation_episodes"],
             use_gate=False,
         )
 
@@ -891,9 +1016,12 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
                 )
                 method_evaluation = evaluate_preference_grid(
                     method_agent,
-                    lambda scene_seed: environment(scene_seed, objective, 0.0, "scipy"),
+                    lambda scene_seed: environment(
+                        scene_seed, objective, 0.0, cfg.policy_allocation_mode
+                    ),
                     manifest["test_scene_seeds"],
                     manifest["preference_grid"],
+                    evaluation_episodes=manifest["evaluation_episodes"],
                     use_gate=False,
                 )
                 test_methods[method] = method_evaluation
@@ -925,9 +1053,12 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
                 )
                 evaluation = evaluate_preference_grid(
                     fixed_agent,
-                    lambda scene_seed: environment(scene_seed, objective, 0.0, "scipy"),
+                    lambda scene_seed: environment(
+                        scene_seed, objective, 0.0, cfg.policy_allocation_mode
+                    ),
                     manifest["test_scene_seeds"],
                     [preference],
+                    evaluation_episodes=manifest["evaluation_episodes"],
                     use_gate=False,
                 )
                 independent_test.append({
@@ -978,10 +1109,13 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
         "test_scene_seeds": manifest["test_scene_seeds"],
         "episodes": manifest["episodes"],
         "evaluation_episodes": manifest["evaluation_episodes"],
+        "ensemble_size": manifest["ensemble_size"],
+        "residual_radius": manifest["residual_radius"],
+        "residual_scales": manifest["residual_scales"],
         "preference_grid": manifest["preference_grid"],
-        "hypervolume_reference_normalized": manifest[
-            "hypervolume_reference_normalized"
-        ],
+        "gate_selection_grid": manifest["gate_selection_grid"],
+        "hypervolume_reference_rule": manifest["hypervolume_reference_rule"],
+        "hypervolume_reference_normalized": hypervolume_reference,
         "anchors": anchors.state_dict(),
         "anchors_lock_sha256": anchor_lock_digest,
         "gate_selection": gate_lock,
@@ -996,6 +1130,9 @@ def _execute_research_run(args, output, manifest, baseline, validation) -> int:
     completed_manifest["summary"] = "pareto_extension_summary.json"
     completed_manifest["summary_payload_sha256"] = result_payload_digest(summary)
     completed_manifest["gate_selection_lock_sha256"] = gate_lock_digest
+    completed_manifest["hypervolume_reference_normalized"] = (
+        hypervolume_reference
+    )
     atomic_write_json(output / "run_manifest.json", completed_manifest)
     return 0
 
@@ -1037,8 +1174,9 @@ def _ba_identity(
     residual_radius,
     transfer_trunks,
     anchor_enabled,
+    anchor_digest,
 ):
-    return {
+    identity = {
         "run_id": f"{method}-seed-{int(seed)}",
         "algorithm": ALGORITHM_ID,
         "method": str(method),
@@ -1059,7 +1197,23 @@ def _ba_identity(
         "residual_scales": manifest["residual_scales"],
         "transfer_trunks": bool(transfer_trunks),
         "anchor_enabled": bool(anchor_enabled),
+        "anchor_digest": str(anchor_digest),
+        "replay_action_semantics": REPLAY_ACTION_SEMANTICS,
     }
+    from ambiguity_hypotheses import AMBIGUITY_IDENTITY_REGISTRIES
+
+    identity.update({
+        "training_seed_protocol": manifest["training_seed_protocol"],
+        "power_hypothesis_id": manifest["power_hypothesis_id"],
+        "baseline_payload_sha256": manifest["baseline_payload_sha256"],
+        "baseline_validation_sha256": manifest["baseline_validation_sha256"],
+        "ambiguity_contract": manifest["ambiguity_contract"],
+        **{
+            field: manifest[field]
+            for field in AMBIGUITY_IDENTITY_REGISTRIES
+        },
+    })
+    return identity
 
 
 def _train_vector_method(
@@ -1096,6 +1250,8 @@ def _train_vector_method(
         residual_scales=manifest["residual_scales"],
         transfer_trunks=transfer_trunks,
         anchor_enabled=anchor_enabled,
+        time_feature_index=environment.time_feature_index,
+        episode_horizon=cfg.N_slots,
     )
     tag = f"{method}-seed-{int(seed)}"
     checkpoint = Path(checkpoint_dir) / f"{tag}.pt"
@@ -1110,6 +1266,7 @@ def _train_vector_method(
         radius,
         transfer_trunks,
         anchor_enabled,
+        agent.anchors.digest(),
     )
     trained = train_ba_pcdtl(
         agent,
@@ -1137,10 +1294,28 @@ def _train_vector_method(
 
 def _vector_training_record(agent, training, output) -> dict:
     checkpoint = Path(output) / training["checkpoint"]
+    checkpoint_digest = _file_sha256(checkpoint)
+    identity_path = checkpoint.with_suffix(
+        checkpoint.suffix + ".identity.json"
+    )
+    identity_payload = {
+        "schema_version": 1,
+        "kind": "training_checkpoint_identity",
+        "checkpoint": training["checkpoint"],
+        "checkpoint_sha256": checkpoint_digest,
+        "identity": training["identity"],
+    }
+    from experiment_protocol import atomic_write_json
+
+    atomic_write_json(identity_path, identity_payload)
     return {
         "checkpoint": training["checkpoint"],
-        "checkpoint_sha256": _file_sha256(checkpoint),
+        "checkpoint_sha256": checkpoint_digest,
+        "checkpoint_identity": str(identity_path.relative_to(output)),
+        "checkpoint_identity_sha256": _file_sha256(identity_path),
         "baseline_policy_digest": agent.baseline_policy_digest,
+        "training_seed": int(training["training_seed"]),
+        "environment_seed": int(training["identity"]["environment_seed"]),
         "identity": training["identity"],
         "training": training["training"],
     }
@@ -1200,9 +1375,15 @@ def _aggregate_gate_candidates(rows) -> list[dict]:
     return result
 
 
-def _evaluate_scalar_agent(agent, environment_factory, scene_seeds) -> dict:
+def _evaluate_scalar_agent(
+        agent, environment_factory, scene_seeds, evaluation_episodes
+) -> dict:
+    evaluation_episodes = int(evaluation_episodes)
+    if evaluation_episodes <= 0:
+        raise ValueError("evaluation_episodes must be positive.")
     metrics = {
         "scene_seeds": [int(seed) for seed in scene_seeds],
+        "evaluation_episodes": evaluation_episodes,
         "communication": [],
         "sensing": [],
         "joint": [],
@@ -1210,36 +1391,71 @@ def _evaluate_scalar_agent(agent, environment_factory, scene_seeds) -> dict:
         "minimum_ue_rate": [],
         "minimum_target_rate": [],
         "feasibility": [],
+        "episode_evidence": [],
+        **{key: [] for key in PROJECTION_EVIDENCE_KEYS},
     }
     for seed in metrics["scene_seeds"]:
         environment = environment_factory(seed)
-        state = environment.reset()
-        per_step = {key: [] for key in (
-            "communication", "sensing", "minimum_ue_rate",
-            "minimum_target_rate", "feasibility",
-        )}
-        done = False
-        while not done:
-            action = agent.select_action(state, explore=False)
-            state, _reward, done, info = environment.step(action)
-            per_step["communication"].append(float(info["communication_sum_rate"]))
-            per_step["sensing"].append(float(info["sensing_sum_rate"]))
-            per_step["minimum_ue_rate"].append(float(np.min(info["rate_u"])))
-            per_step["minimum_target_rate"].append(float(np.min(info["rate_k"])))
-            per_step["feasibility"].append(
-                float(bool(info["physical_constraints_feasible"]))
+        episode = {
+            "scene_seed": seed,
+            "communication": [],
+            "sensing": [],
+            "joint": [],
+            "objective": [],
+            "minimum_ue_rate": [],
+            "minimum_target_rate": [],
+            "feasibility": [],
+            **{key: [] for key in PROJECTION_EVIDENCE_KEYS},
+        }
+        for _episode_index in range(evaluation_episodes):
+            state = environment.reset()
+            per_step = {key: [] for key in (
+                "communication", "sensing", "minimum_ue_rate",
+                "minimum_target_rate", "feasibility", *PROJECTION_EVIDENCE_KEYS,
+            )}
+            done = False
+            while not done:
+                action = agent.select_action(state, explore=False)
+                state, _reward, done, info = environment.step(action)
+                per_step["communication"].append(
+                    float(info["communication_sum_rate"])
+                )
+                per_step["sensing"].append(float(info["sensing_sum_rate"]))
+                per_step["minimum_ue_rate"].append(
+                    float(np.min(info["rate_u"]))
+                )
+                per_step["minimum_target_rate"].append(
+                    float(np.min(info["rate_k"]))
+                )
+                per_step["feasibility"].append(
+                    float(bool(info["physical_constraints_feasible"]))
+                )
+                for key, value in step_projection_evidence(info).items():
+                    per_step[key].append(value)
+            communication = float(np.mean(per_step["communication"]))
+            sensing = float(np.mean(per_step["sensing"]))
+            episode["communication"].append(communication)
+            episode["sensing"].append(sensing)
+            episode["joint"].append(communication + sensing)
+            episode["objective"].append(communication + sensing)
+            episode["minimum_ue_rate"].append(
+                float(np.min(per_step["minimum_ue_rate"]))
             )
-        communication = float(np.mean(per_step["communication"]))
-        sensing = float(np.mean(per_step["sensing"]))
-        metrics["communication"].append(communication)
-        metrics["sensing"].append(sensing)
-        metrics["joint"].append(communication + sensing)
-        metrics["objective"].append(communication + sensing)
-        metrics["minimum_ue_rate"].append(float(np.min(per_step["minimum_ue_rate"])))
-        metrics["minimum_target_rate"].append(
-            float(np.min(per_step["minimum_target_rate"]))
-        )
-        metrics["feasibility"].append(float(np.mean(per_step["feasibility"])))
+            episode["minimum_target_rate"].append(
+                float(np.min(per_step["minimum_target_rate"]))
+            )
+            episode["feasibility"].append(
+                float(np.mean(per_step["feasibility"]))
+            )
+            for key in PROJECTION_EVIDENCE_KEYS:
+                episode[key].append(float(np.mean(per_step[key])))
+        metrics["episode_evidence"].append(episode)
+        for key in ("communication", "sensing", "joint", "objective"):
+            metrics[key].append(float(np.mean(episode[key])))
+        for key in ("minimum_ue_rate", "minimum_target_rate"):
+            metrics[key].append(float(np.min(episode[key])))
+        for key in ("feasibility", *PROJECTION_EVIDENCE_KEYS):
+            metrics[key].append(float(np.mean(episode[key])))
     return metrics
 
 

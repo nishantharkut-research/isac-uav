@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 from typing import Iterable, Mapping
 
 import numpy as np
@@ -11,6 +13,17 @@ from scipy import stats
 
 OBJECTIVE_DIM = 2
 PNG_PREFERENCE = np.array([0.5, 0.5], dtype=np.float64)
+
+
+def discounted_return_scale(gamma: float, horizon: int) -> float:
+    """Map a stationary per-step rate to its finite-horizon discounted return."""
+    gamma = float(gamma)
+    horizon = int(horizon)
+    if not 0.0 <= gamma < 1.0 or horizon <= 0:
+        raise ValueError("Discount scale requires gamma in [0, 1) and horizon > 0.")
+    if gamma == 0.0:
+        return 1.0
+    return float((1.0 - gamma ** horizon) / (1.0 - gamma))
 
 
 def _objective_array(values, name: str = "values") -> np.ndarray:
@@ -45,12 +58,19 @@ class ParetoAnchors:
         self.frozen = False
         self.provenance: dict = {}
 
-    def update_training(self, objective_values) -> None:
+    def update_training(self, objective_values, lower_quantile=0.0,
+                        upper_quantile=1.0) -> None:
         if self.frozen:
             raise RuntimeError("Pareto anchors are frozen and cannot be updated.")
         values = _objective_array(objective_values, "training objective values")
-        batch_ideal = values.max(axis=0)
-        batch_nadir = values.min(axis=0)
+        lower_quantile = float(lower_quantile)
+        upper_quantile = float(upper_quantile)
+        if not 0.0 <= lower_quantile < upper_quantile <= 1.0:
+            raise ValueError(
+                "Pareto anchor quantiles must satisfy 0 <= low < high <= 1."
+            )
+        batch_ideal = np.quantile(values, upper_quantile, axis=0)
+        batch_nadir = np.quantile(values, lower_quantile, axis=0)
         self.ideal = (
             batch_ideal.copy()
             if self.ideal is None
@@ -86,6 +106,14 @@ class ParetoAnchors:
             "provenance": dict(self.provenance),
         }
 
+    def digest(self) -> str:
+        """Return a canonical identity for checkpoint and run provenance."""
+        encoded = json.dumps(
+            self.state_dict(), sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
     @classmethod
     def from_state_dict(cls, state: Mapping) -> "ParetoAnchors":
         if int(state.get("schema_version", -1)) != cls.SCHEMA_VERSION:
@@ -107,6 +135,17 @@ class ParetoAnchors:
             if span is None or np.any(span <= 0.0):
                 raise ValueError("Frozen Pareto anchors require positive spans.")
         return result
+
+
+def normalized_physical_zero_reference(
+    anchors: ParetoAnchors, *, margin: float = 0.05
+) -> np.ndarray:
+    """Return a frozen reference strictly below every nonnegative rate pair."""
+    margin = float(margin)
+    if not np.isfinite(margin) or margin <= 0.0:
+        raise ValueError("Hypervolume reference margin must be positive and finite.")
+    zero = anchors.normalize([[0.0, 0.0]])[0]
+    return zero - margin
 
 
 def scalarize_returns(

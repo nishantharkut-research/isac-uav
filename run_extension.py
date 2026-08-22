@@ -29,12 +29,17 @@ def build_parser():
     parser.add_argument("--seeds", required=True, help="Comma-separated, at least five")
     parser.add_argument("--objective", required=True, choices=OBJECTIVE_CHOICES)
     parser.add_argument("--retention", type=float)
-    parser.add_argument("--pareto-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--pareto-weight",
+        type=float,
+        default=0.5,
+        help="legacy normalized sensing weight; communication uses 1 - weight",
+    )
     parser.add_argument("--user-rate-min", type=float)
     parser.add_argument("--target-rate-min", type=float)
     parser.add_argument("--episodes", type=int, default=1500)
     parser.add_argument("--eval-episodes", type=int, default=5)
-    parser.add_argument("--checkpoint-every", type=int, default=10)
+    parser.add_argument("--checkpoint-every", type=int, default=1)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return add_ambiguity_cli_arguments(parser)
@@ -116,15 +121,16 @@ def run(args):
     from environment import HRISUAVISACEnv
     from experiment_protocol import (
         atomic_write_json, ensure_run_directory, evaluation_metrics,
+        final_window_mean,
         make_run_manifest, parse_seeds, physical_configuration_fingerprint,
         resolve_required_checkpoint,
         serializable_training_result,
-        TRAINING_SEED_PROTOCOL,
+        write_training_checkpoint_identity,
+        EVALUATION_SEED_PROTOCOL, TRAINING_SEED_PROTOCOL,
+        evaluation_scene_seed_grid,
         derive_training_seed,
     )
-    from parameter_profiles import (
-        activate_profile, load_calibrated_profile, load_profile,
-    )
+    from parameter_profiles import activate_profile, load_calibrated_profile
     from research_objectives import ObjectiveSpec
     from simulation import (
         train_ddpg,
@@ -133,11 +139,7 @@ def run(args):
     from source_integrity import source_tree_digest
 
     seeds = parse_seeds(args.seeds)
-    profile = (
-        load_profile(args.profile)
-        if args.dry_run
-        else load_calibrated_profile(args.profile)
-    )
+    profile = load_calibrated_profile(args.profile)
     activate_profile(profile)
     apply_ambiguity_arguments(args, cfg)
     baseline_path = Path(args.baseline_summary).resolve()
@@ -163,7 +165,13 @@ def run(args):
     if baseline.get("power_hypothesis_id") != cfg.power_hypothesis_id:
         raise ValueError("Baseline used a different power hypothesis.")
     require_matching_ambiguity_contract(baseline, cfg)
-    from validate_results import result_payload_digest
+    from validate_results import (
+        require_canonical_baseline_validation,
+        result_payload_digest,
+    )
+    require_canonical_baseline_validation(
+        baseline, baseline_validation, baseline_path.parent
+    )
     baseline_payload_digest = result_payload_digest(baseline)
     baseline_validation_digest = result_payload_digest(baseline_validation)
 
@@ -179,21 +187,45 @@ def run(args):
     manifest["power_hypothesis_id"] = cfg.power_hypothesis_id
     manifest["source_tree_digest"] = current_source_digest
     manifest["training_seed_protocol"] = TRAINING_SEED_PROTOCOL
+    manifest["evaluation_seed_protocol"] = EVALUATION_SEED_PROTOCOL
     manifest["baseline_payload_sha256"] = baseline_payload_digest
     manifest["baseline_validation_sha256"] = baseline_validation_digest
     manifest["episodes"] = args.episodes
     manifest["evaluation_episodes"] = args.eval_episodes
+    manifest["objective_reference_protocol"] = (
+        "accepted_baseline_training_tail_v1"
+    )
+    manifest["objective_reference_window"] = 100
+    evaluation_seed_grid = evaluation_scene_seed_grid(
+        seeds, args.eval_episodes
+    )
     output = ensure_run_directory(args.output, manifest)
     if args.dry_run:
         return 0
     baseline_by_seed = {int(row["seed"]): row for row in baseline["seed_records"]}
     checkpoint_dir = output / "checkpoints"
     seed_records = []
+    objective_reference_window = 100
     for seed in seeds:
         baseline_record = baseline_by_seed[seed]
-        baseline_method = baseline_record["methods"]["DTL-pCSI"]["evaluation"]
-        comm_reference = float(baseline_method["communication_mean"])
-        sensing_reference = float(baseline_method["sensing_mean"])
+        evaluation_scene_seeds = evaluation_seed_grid[seed]
+        if (
+            baseline.get("evaluation_seed_protocol")
+            != EVALUATION_SEED_PROTOCOL
+            or baseline_record.get("evaluation_scene_seeds")
+            != evaluation_scene_seeds
+        ):
+            raise ValueError(
+                "Baseline evaluation scenes do not match the canonical paired "
+                "schedule."
+            )
+        baseline_training = baseline_record["methods"]["DTL-pCSI"]["training"]
+        comm_reference = final_window_mean(
+            baseline_training["comm_rates"], objective_reference_window
+        )
+        sensing_reference = final_window_mean(
+            baseline_training["sensing_rates"], objective_reference_window
+        )
         if args.objective == "png_joint_sum":
             objective = ObjectiveSpec.png_joint(
                 user_rate_min=user_floor,
@@ -231,6 +263,7 @@ def run(args):
             sigma2_scee=cfg.rho_nmse,
             seed=baseline_record["source_seed"],
             objective_spec=ObjectiveSpec.paper(target_rate_min=cfg.R_min),
+            allocation_mode=cfg.policy_allocation_mode,
         )
         source = train_ddpg(
             source_env, baseline["episodes"], source_tag,
@@ -248,6 +281,7 @@ def run(args):
         tag = f"extension-{args.objective}-seed-{seed}"
         environment = HRISUAVISACEnv(
             sigma2_scee=0.0, seed=target_seed, objective_spec=objective,
+            allocation_mode=cfg.policy_allocation_mode,
         )
         checkpoint = checkpoint_dir / f"{tag}.pt"
         trained = train_dtl(
@@ -260,21 +294,31 @@ def run(args):
         def environment_factory(index):
             return HRISUAVISACEnv(
                 sigma2_scee=0.0,
-                seed=target_seed + 10_000 + index,
+                seed=evaluation_scene_seeds[index],
                 objective_spec=objective,
-                allocation_mode="scipy",
+                allocation_mode=cfg.policy_allocation_mode,
             )
 
         evaluation = evaluation_metrics(
             trained["agent"], environment_factory, args.eval_episodes
+        )
+        checkpoint_authority = write_training_checkpoint_identity(
+            output, checkpoint, trained["checkpoint_identity"]
         )
         seed_records.append({
             "seed": seed,
             "objective": objective.as_dict(),
             "tag": tag,
             "training_seed": target_training_seed,
-            "checkpoint": str(checkpoint.relative_to(output)),
-            "checkpoint_sha256": _file_sha256(checkpoint),
+            "environment_seed": target_seed,
+            "evaluation_scene_seeds": evaluation_scene_seeds,
+            "objective_reference": {
+                "source": "accepted_baseline_training_tail",
+                "window": objective_reference_window,
+                "communication": comm_reference,
+                "sensing": sensing_reference,
+            },
+            **checkpoint_authority,
             "training": serializable_training_result(trained),
             "evaluation": evaluation,
         })
@@ -293,11 +337,14 @@ def run(args):
         "power_hypothesis_id": cfg.power_hypothesis_id,
         "source_tree_digest": current_source_digest,
         "training_seed_protocol": TRAINING_SEED_PROTOCOL,
+        "evaluation_seed_protocol": EVALUATION_SEED_PROTOCOL,
         "baseline_payload_sha256": baseline_payload_digest,
         "baseline_validation_sha256": baseline_validation_digest,
         "seeds": list(seeds),
         "episodes": args.episodes,
         "evaluation_episodes": args.eval_episodes,
+        "objective_reference_protocol": "accepted_baseline_training_tail_v1",
+        "objective_reference_window": objective_reference_window,
         "feasibility_rate": min(
             row["evaluation"]["feasibility_rate"] for row in seed_records
         ),

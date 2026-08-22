@@ -22,6 +22,18 @@ class RestoredTrainingState:
     extra: dict
 
 
+def _sync_parent_directory(path: Path) -> None:
+    """Persist a replaced directory entry where the host OS exposes that API."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _json_default(value: Any):
     if isinstance(value, np.generic):
         return value.item()
@@ -128,9 +140,110 @@ def save_training_checkpoint(
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, target)
+        _sync_parent_directory(target)
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def inspect_training_checkpoint(path) -> dict:
+    """Read immutable checkpoint authority fields without restoring state."""
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {source}")
+    with source.open("rb") as stream:
+        payload = torch.load(stream, map_location="cpu", weights_only=False)
+    if not isinstance(payload, Mapping):
+        raise ValueError("Training checkpoint payload must be a mapping.")
+    if int(payload.get("schema_version", -1)) != CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("Unsupported training checkpoint schema.")
+    identity = payload.get("identity")
+    if payload.get("identity_canonical") != _canonical_identity(identity):
+        raise ValueError("Training checkpoint has an invalid canonical identity.")
+    completed_episode = payload.get("completed_episode")
+    if (
+        isinstance(completed_episode, bool)
+        or not isinstance(completed_episode, (int, np.integer))
+        or int(completed_episode) < 0
+    ):
+        raise ValueError("Training checkpoint has an invalid completed episode.")
+    histories = payload.get("histories")
+    if not isinstance(histories, Mapping):
+        raise ValueError("Training checkpoint histories must be a mapping.")
+    for required in ("agent", "environment", "rng"):
+        if not isinstance(payload.get(required), Mapping):
+            raise ValueError(f"Training checkpoint is missing {required} state.")
+    return {
+        "completed_episode": int(completed_episode),
+        "identity": dict(identity),
+        "histories": dict(histories),
+        "agent": dict(payload["agent"]),
+    }
+
+
+def validate_checkpoint_authority(
+    path,
+    expected_identity: Mapping[str, Any],
+    serialized_training: Mapping[str, Any],
+) -> dict:
+    """Bind a checkpoint's internal identity and histories to a result row."""
+    inspected = inspect_training_checkpoint(path)
+    expected_identity = dict(expected_identity)
+    if inspected["identity"] != expected_identity:
+        raise ValueError("Checkpoint internal identity does not match its result row.")
+    if expected_identity.get("algorithm") == "DTL":
+        from source_integrity import source_model_state_digest
+
+        embedded_source = inspected["agent"].get("source_agent")
+        if source_model_state_digest(embedded_source) != expected_identity.get(
+            "source_model_digest"
+        ):
+            raise ValueError(
+                "Checkpoint embedded source model does not match its identity."
+            )
+    requested = expected_identity.get("requested_episode_target")
+    if (
+        isinstance(requested, bool)
+        or not isinstance(requested, (int, np.integer))
+        or int(requested) < 0
+        or inspected["completed_episode"] != int(requested)
+    ):
+        raise ValueError("Checkpoint is not complete for its requested episode target.")
+    if not isinstance(serialized_training, Mapping):
+        raise ValueError("Serialized training evidence must be a mapping.")
+    expected_histories = serialized_training.get("histories")
+    if expected_histories is None:
+        expected_histories = {
+            key: serialized_training[key]
+            for key in inspected["histories"]
+            if key in serialized_training
+        }
+    if set(expected_histories) != set(inspected["histories"]):
+        raise ValueError("Checkpoint and result history keys do not match.")
+    normalized = {}
+    for key, values in inspected["histories"].items():
+        array = np.asarray(values, dtype=float)
+        if (
+            array.ndim != 1
+            or array.size != inspected["completed_episode"]
+            or not np.all(np.isfinite(array))
+        ):
+            raise ValueError(
+                f"Checkpoint history {key} is incomplete or nonfinite."
+            )
+        expected_array = np.asarray(expected_histories[key], dtype=float)
+        if (
+            expected_array.shape != array.shape
+            or not np.array_equal(expected_array, array)
+        ):
+            raise ValueError(
+                f"Checkpoint history {key} does not match result evidence."
+            )
+        normalized[key] = array.tolist()
+    return {
+        **inspected,
+        "histories": normalized,
+    }
 
 
 def load_training_checkpoint(
@@ -150,10 +263,14 @@ def load_training_checkpoint(
 
     expected = _canonical_identity(expected_identity)
     actual = payload.get("identity_canonical")
-    if actual != expected:
+    try:
+        structured = _canonical_identity(payload.get("identity"))
+    except (TypeError, ValueError):
+        structured = None
+    if actual != expected or structured != expected:
         raise ValueError(
             "Checkpoint identity mismatch; refusing to combine different runs. "
-            f"Expected {expected}, got {actual}."
+            f"Expected {expected}, got canonical={actual}, structured={structured}."
         )
 
     agent.load_training_state_dict(payload["agent"])

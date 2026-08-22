@@ -6,7 +6,10 @@ from pathlib import Path
 
 import numpy as np
 
-from ambiguity_hypotheses import valid_ambiguity_manifest_fields
+from ambiguity_hypotheses import (
+    AMBIGUITY_IDENTITY_REGISTRIES,
+    valid_ambiguity_manifest_fields,
+)
 from scipy.stats import t
 
 from cross_figure_validation import validate_figure_payload
@@ -51,11 +54,8 @@ _MANIFEST_SHARED_FIELDS = (
     "baseline_validation_sha256",
     "episodes",
     "evaluation_episodes",
-    "noise_hypothesis_id",
-    "dtl_transfer_mode",
-    "dtl_transfer_schedule_id",
-    "wfb_hypothesis_id",
-    "ddpg_comparator_csi_hypothesis_id",
+    *AMBIGUITY_IDENTITY_REGISTRIES.keys(),
+    "ambiguity_contract",
 )
 
 

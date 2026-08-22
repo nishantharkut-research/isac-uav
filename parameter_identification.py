@@ -1,5 +1,6 @@
 """Provenance-bounded structural identification without curve fitting or DRL."""
 import argparse
+from contextlib import nullcontext
 import json
 import math
 from pathlib import Path
@@ -13,7 +14,12 @@ from parameter_evidence import (
     PARAMETER_EVIDENCE,
     STRUCTURAL_IDENTIFICATION_KEYS,
 )
-from parameter_profiles import applied_profile, profile_from_mapping, write_profile
+from parameter_profiles import (
+    active_profile_metadata,
+    applied_profile,
+    profile_from_mapping,
+    write_profile,
+)
 from sinr_rate import (
     active_tx_power,
     active_tx_power_envelope,
@@ -25,14 +31,15 @@ from sinr_rate import (
 CALIBRATION_SEEDS = tuple(range(21_000, 21_008))
 HOLDOUT_SEEDS = tuple(range(22_000, 22_008))
 STRESS_SEEDS = tuple(range(23_000, 23_032))
-ACTION_PROBE_LABELS = ("zero_active", "half_active", "full_active")
-SENSING_FLOOR_SAFETY = 0.5
-UPPER_CONSTRAINT_HEADROOM = 2.0
+ACTION_PROBE_LABELS = (
+    "zero_active", "half_active", "full_active",
+    "phase_variant_half", "phase_variant_full",
+)
+MINIMUM_COMM_ACTION_RESPONSE = 0.005
 
 _SEARCH_KEYS = (
     "omega_0", "rho_br", "rho_rt", "zeta_los", "zeta_nlos",
     "ue_x_min", "ue_x_max", "ue_y_min", "ue_y_max",
-    "R_min", "Psi_max", "P_a_max",
 )
 _LOG_KEYS = {"omega_0", "rho_br", "rho_rt", "R_min", "Psi_max", "P_a_max"}
 
@@ -70,11 +77,11 @@ def generate_candidates(count, seed=cfg.random_seed):
         zeta_nlos = zeta_los + exponent_gap
         ue_x_min = row[5] * 200.0
         ue_y_min = row[6] * 100.0
-        # Provisional loose limits are replaced from calibration extrema in
-        # calibrate_constraint_profile before candidate ranking.
-        r_min = 0.01
-        psi_max = 1e-8
-        p_a_max = max(float(cfg.PT) * 10.0, float(cfg.sigma2_qa) * 1.001)
+        # These paper-omitted limits are explicit assumptions, not quantities
+        # that can be inferred from the channel candidate being scored.
+        r_min = float(PARAMETER_EVIDENCE["R_min"].value)
+        psi_max = float(PARAMETER_EVIDENCE["Psi_max"].value)
+        p_a_max = float(PARAMETER_EVIDENCE["P_a_max"].value)
         values = {
             "omega_0": omega_0,
             "rho_br": rho_br,
@@ -125,38 +132,6 @@ def profile_prior_distance(profile):
     return float(np.mean(distances)) if distances else 0.0
 
 
-def derive_constraint_values(raw_scenes):
-    """Derive conservative limits from calibration extrema, not paper curves."""
-    if not raw_scenes:
-        raise ValueError("raw calibration scenes are required")
-    for key in ("min_sensing_rate", "P_ai_envelope", "cascade_power"):
-        values = np.asarray([row[key] for row in raw_scenes], dtype=float)
-        if values.size == 0 or not np.all(np.isfinite(values)):
-            raise ValueError(f"cannot derive {key} from non-finite scenes")
-    sensing = np.asarray(
-        [row["min_sensing_rate"] for row in raw_scenes], dtype=float
-    )
-    active = np.asarray(
-        [row["P_ai_envelope"] for row in raw_scenes], dtype=float
-    )
-    cascade = np.asarray(
-        [row["cascade_power"] for row in raw_scenes], dtype=float
-    )
-    return {
-        "R_min": float(np.clip(
-            SENSING_FLOOR_SAFETY * np.min(sensing), 1e-6, 4.0
-        )),
-        "P_a_max": float(np.clip(
-            UPPER_CONSTRAINT_HEADROOM * np.max(active),
-            max(float(cfg.sigma2_qa) * 1.001, 1e-12),
-            10.0,
-        )),
-        "Psi_max": float(np.clip(
-            UPPER_CONSTRAINT_HEADROOM * np.max(cascade), 1e-20, 1.0
-        )),
-    }
-
-
 def _scene(seed):
     rng = np.random.default_rng(int(seed))
     pos_ues = [
@@ -182,16 +157,30 @@ def _scene(seed):
 
 
 def _action_probes(seed):
-    """Cover the policy's zero, half, and full active-gain boundaries."""
+    """Cover active-gain boundaries plus independent phase configurations."""
     rng = np.random.default_rng(np.random.SeedSequence([int(seed), 7]))
     theta = np.exp(1j * rng.uniform(0.0, 2.0 * np.pi, cfg.Lp))
     unit_active = np.exp(
+        1j * rng.uniform(0.0, 2.0 * np.pi, cfg.La)
+    )
+    theta_variant = np.exp(
+        1j * rng.uniform(0.0, 2.0 * np.pi, cfg.Lp)
+    )
+    active_variant = np.exp(
         1j * rng.uniform(0.0, 2.0 * np.pi, cfg.La)
     )
     return (
         ("zero_active", theta, np.zeros(cfg.La, dtype=complex)),
         ("half_active", theta, (cfg.alpha_max / 2.0) * unit_active),
         ("full_active", theta, cfg.alpha_max * unit_active),
+        (
+            "phase_variant_half", theta_variant,
+            (cfg.alpha_max / 2.0) * active_variant,
+        ),
+        (
+            "phase_variant_full", np.conj(theta_variant),
+            cfg.alpha_max * np.conj(active_variant),
+        ),
     )
 
 
@@ -204,13 +193,23 @@ def _coefficient_of_variation(values):
 
 def evaluate_candidate(profile, seeds=CALIBRATION_SEEDS,
                        sensing_rate_min=None):
-    """Evaluate raw channels and boundary actions; never train an agent."""
+    """Evaluate raw channels and boundary actions; never train an agent.
+
+    Pass ``profile=None`` to assess the already activated configuration,
+    including its current executable ambiguity hypotheses.
+    """
     seeds = tuple(int(seed) for seed in seeds)
     if not seeds:
         raise ValueError("at least one evaluation seed is required")
     raw_scenes = []
     errors = []
-    with applied_profile(profile):
+    profile_context = (
+        nullcontext() if profile is None else applied_profile(profile)
+    )
+    profile_digest = (
+        active_profile_metadata()["digest"] if profile is None else profile.digest
+    )
+    with profile_context:
         for seed in seeds:
             try:
                 pos_uav, pos_ues, pos_tes = _scene(seed)
@@ -232,7 +231,7 @@ def evaluate_candidate(profile, seeds=CALIBRATION_SEEDS,
                     comm_rate = float(np.sum(rate_u))
                     sensing_rate = float(np.sum(rate_k))
                     min_sensing_rate = float(np.min(rate_k))
-                    p_ai = active_tx_power(channel, T, phi)
+                    p_ai = active_tx_power(channel, C, T, phi)
                     cascade_power = cascade_power_16c(channel, theta)
                     total_power = float(
                         np.linalg.norm(C, "fro") ** 2
@@ -287,6 +286,32 @@ def evaluate_candidate(profile, seeds=CALIBRATION_SEEDS,
     comm_rates = [row["comm_rate"] for row in raw_scenes]
     sensing_rates = [row["sensing_rate"] for row in raw_scenes]
 
+    def grouped_values(key):
+        return [
+            np.asarray(
+                [row[key] for row in raw_scenes if row["seed"] == seed],
+                dtype=float,
+            )
+            for seed in seeds
+        ]
+
+    def action_spans(key):
+        spans = []
+        for values in grouped_values(key):
+            if values.size != len(ACTION_PROBE_LABELS):
+                continue
+            spans.append(float(
+                np.ptp(values) / (abs(float(np.mean(values))) + 1e-12)
+            ))
+        return spans
+
+    comm_groups = grouped_values("comm_rate")
+    sensing_groups = grouped_values("sensing_rate")
+    comm_seed_means = [float(np.mean(values)) for values in comm_groups]
+    sensing_seed_means = [float(np.mean(values)) for values in sensing_groups]
+    comm_action_spans = action_spans("comm_rate")
+    sensing_action_spans = action_spans("sensing_rate")
+
     def fraction(key):
         return sum(bool(row[key]) for row in raw_scenes) / count
 
@@ -295,7 +320,7 @@ def evaluate_candidate(profile, seeds=CALIBRATION_SEEDS,
         return float(np.median(values)) if values else math.inf
 
     return {
-        "profile_digest": profile.digest,
+        "profile_digest": profile_digest,
         "seeds": list(seeds),
         "finite_fraction": fraction("finite"),
         "power_contract_fraction": fraction("power_contract_feasible"),
@@ -310,65 +335,23 @@ def evaluate_candidate(profile, seeds=CALIBRATION_SEEDS,
         "sensing_rate_mean": (
             float(np.mean(sensing_rates)) if sensing_rates else math.inf
         ),
-        "comm_rate_cv": _coefficient_of_variation(comm_rates),
-        "sensing_rate_cv": _coefficient_of_variation(sensing_rates),
+        "comm_rate_cv": _coefficient_of_variation(comm_seed_means),
+        "sensing_rate_cv": _coefficient_of_variation(sensing_seed_means),
+        "comm_action_response_median": (
+            float(np.median(comm_action_spans))
+            if comm_action_spans else 0.0
+        ),
+        "comm_action_response_minimum": (
+            float(np.min(comm_action_spans))
+            if comm_action_spans else 0.0
+        ),
+        "sensing_action_response_median": (
+            float(np.median(sensing_action_spans))
+            if sensing_action_spans else 0.0
+        ),
         "raw_scenes": raw_scenes,
         "errors": errors,
     }
-
-
-def calibrate_constraint_profile(profile, seeds=CALIBRATION_SEEDS):
-    """Replace omitted limits from unconstrained calibration extrema."""
-    pilot_metrics = evaluate_candidate(
-        profile, seeds=seeds, sensing_rate_min=0.0
-    )
-    if pilot_metrics["errors"] or pilot_metrics["finite_fraction"] != 1.0:
-        raise RuntimeError("constraint calibration pilot did not produce finite scenes")
-    derived = derive_constraint_values(pilot_metrics["raw_scenes"])
-    raw_extrema = {
-        "minimum_sensing_rate": float(min(
-            row["min_sensing_rate"]
-            for row in pilot_metrics["raw_scenes"]
-        )),
-        "maximum_active_power_envelope": float(max(
-            row["P_ai_envelope"]
-            for row in pilot_metrics["raw_scenes"]
-        )),
-        "maximum_cascade_power": float(max(
-            row["cascade_power"]
-            for row in pilot_metrics["raw_scenes"]
-        )),
-    }
-    values = dict(profile.values)
-    values.update(derived)
-    payload = {
-        "schema_version": 1,
-        "name": profile.name,
-        "kind": "candidate",
-        "values": values,
-        "evidence": {key: key for key in values},
-        "selection": {
-            **dict(profile.selection),
-            "constraint_calibration": {
-                "R_min": "0.5 times minimum raw target rate",
-                "P_a_max": (
-                    "2 times maximum analytical full-gain Eq. (18) envelope"
-                ),
-                "Psi_max": "2 times maximum raw Eq. (16c) cascade power",
-                "action_probes": list(ACTION_PROBE_LABELS),
-                "seeds": list(seeds),
-                "communication_rate_magnitude_used": False,
-                "raw_extrema": raw_extrema,
-                "selected_values": dict(derived),
-                "evidence_bounds_enforced": {
-                    key: list(PARAMETER_EVIDENCE[key].bounds)
-                    for key in ("R_min", "P_a_max", "Psi_max")
-                },
-            },
-            "provisional_profile_digest": profile.digest,
-        },
-    }
-    return profile_from_mapping(payload)
 
 
 def _finite_numeric_tree(value):
@@ -439,11 +422,18 @@ def score_candidate(metrics, prior_distance):
     stability = min(float(metrics["comm_rate_cv"]), 10.0) + min(
         float(metrics["sensing_rate_cv"]), 10.0
     )
+    action_response = float(metrics["comm_action_response_median"])
+    action_sensitivity = 20.0 * max(
+        0.0,
+        (MINIMUM_COMM_ACTION_RESPONSE - action_response)
+        / MINIMUM_COMM_ACTION_RESPONSE,
+    ) ** 2
     prior = 0.5 * float(prior_distance)
     components = {
         "feasibility": feasibility,
         "constraint_utilization": utilization,
         "seed_stability": stability,
+        "action_sensitivity": action_sensitivity,
         "evidence_prior_distance": prior,
     }
     return {
@@ -472,6 +462,13 @@ def structural_acceptance(metrics):
         reasons.append("joint feasibility must equal 1")
     if metrics.get("errors"):
         reasons.append("scene evaluation errors are not accepted")
+    if float(metrics.get("comm_action_response_median", 0.0)) < (
+        MINIMUM_COMM_ACTION_RESPONSE
+    ):
+        reasons.append(
+            "median communication response across policy actions must be at "
+            f"least {MINIMUM_COMM_ACTION_RESPONSE:.3g}"
+        )
     return not reasons, reasons
 
 
@@ -494,6 +491,9 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
                holdout_seeds=HOLDOUT_SEEDS,
                stress_seeds=STRESS_SEEDS):
     """Rank on calibration, then require strict holdout and stress passes."""
+    from source_integrity import source_tree_digest
+
+    source_digest = source_tree_digest()
     calibration_seeds = tuple(calibration_seeds)
     holdout_seeds = tuple(holdout_seeds)
     stress_seeds = tuple(stress_seeds)
@@ -519,10 +519,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
     provisional_profiles = generate_candidates(
         candidate_count, seed=generator_seed
     )
-    profiles = [
-        calibrate_constraint_profile(profile, seeds=calibration_seeds)
-        for profile in provisional_profiles
-    ]
+    profiles = provisional_profiles
     records = []
     for profile in profiles:
         metrics = evaluate_candidate(profile, seeds=calibration_seeds)
@@ -553,6 +550,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
     holdout_accepted, holdout_reasons = structural_acceptance(holdout_metrics)
     holdout_report = {
         "schema_version": 1,
+        "source_tree_digest": source_digest,
         "source_candidate_digest": selected["profile"].digest,
         "seeds": list(holdout_seeds),
         "action_probes": list(ACTION_PROBE_LABELS),
@@ -596,6 +594,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
             "calibration_score": selected["score"]["score"],
             "holdout_score": holdout_score["score"],
             "paper_curve_ordinates_used": False,
+            "source_tree_digest": source_digest,
         },
     }
     identified = profile_from_mapping(identified_payload)
@@ -606,6 +605,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
     stress_accepted, stress_reasons = structural_acceptance(stress_metrics)
     stress_report = {
         "schema_version": 1,
+        "source_tree_digest": source_digest,
         "profile_digest": identified.digest,
         "seeds": list(stress_seeds),
         "action_probes": list(ACTION_PROBE_LABELS),
@@ -628,6 +628,7 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
 
     manifest = {
         "schema_version": 1,
+        "source_tree_digest": source_digest,
         "method": "structural parameter identification",
         "selection_rule": (
             "minimum predeclared structural score among strict calibration "
@@ -636,22 +637,12 @@ def run_search(output_dir, candidate_count=32, generator_seed=cfg.random_seed,
         ),
         "score_components": [
             "strict feasibility", "constraint utilization",
-            "seed stability", "evidence prior distance",
+            "seed stability", "action sensitivity", "evidence prior distance",
         ],
-        "constraint_derivation": {
-            "R_min": (
-                "0.5 times minimum calibration target rate, clipped to "
-                "the predeclared evidence bounds"
-            ),
-            "P_a_max": (
-                "2 times maximum analytical Eq. (18) envelope, clipped to "
-                "the predeclared evidence bounds"
-            ),
-            "Psi_max": (
-                "2 times maximum Eq. (16c) cascade power, clipped to the "
-                "predeclared evidence bounds"
-            ),
-        },
+        "constraint_policy": (
+            "R_min, P_a_max, and Psi_max remain explicit fixed assumptions; "
+            "they are not re-derived from each candidate's channel gains"
+        ),
         "generator_seed": int(generator_seed),
         "calibration_seeds": list(calibration_seeds),
         "holdout_seeds": list(holdout_seeds),

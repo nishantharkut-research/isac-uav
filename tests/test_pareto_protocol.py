@@ -7,6 +7,7 @@ from pareto_protocol import (
     ParetoAnchors,
     holm_adjust,
     hypervolume_2d,
+    normalized_physical_zero_reference,
     nondominated_mask,
     paired_confidence_interval,
     scalarize_returns,
@@ -81,6 +82,27 @@ class AnchorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ParetoAnchors.from_state_dict(state)
 
+    def test_quantile_anchors_reject_outliers_and_have_stable_identity(self):
+        typical = np.column_stack([
+            np.linspace(1.0, 3.0, 100),
+            np.linspace(10.0, 14.0, 100),
+        ])
+        values = np.vstack([typical, [-1_000.0, 1_000.0], [1_000.0, -1_000.0]])
+        anchors = ParetoAnchors()
+        anchors.update_training(values, lower_quantile=0.05, upper_quantile=0.95)
+        anchors.freeze({"partition": "converged_training_tail"})
+
+        self.assertGreater(anchors.nadir[0], -1_000.0)
+        self.assertGreater(anchors.nadir[1], -1_000.0)
+        self.assertLess(anchors.ideal[0], 1_000.0)
+        self.assertLess(anchors.ideal[1], 1_000.0)
+        restored = ParetoAnchors.from_state_dict(anchors.state_dict())
+        self.assertEqual(restored.digest(), anchors.digest())
+
+        altered = ParetoAnchors.from_state_dict(anchors.state_dict())
+        altered.provenance["partition"] = "different"
+        self.assertNotEqual(altered.digest(), anchors.digest())
+
 
 class ParetoAndStatisticsTests(unittest.TestCase):
     def test_nondominance_and_known_hypervolume(self):
@@ -96,6 +118,15 @@ class ParetoAndStatisticsTests(unittest.TestCase):
             hypervolume_2d([[1.0, np.nan]], [0.0, 0.0])
         with self.assertRaisesRegex(ValueError, "reference"):
             hypervolume_2d([[-1.0, 1.0]], [0.0, 0.0])
+
+    def test_hypervolume_reference_is_below_all_nonnegative_physical_rates(self):
+        anchors = ParetoAnchors()
+        anchors.update_training([[2.0, 4.0], [6.0, 10.0]])
+        anchors.freeze()
+        reference = normalized_physical_zero_reference(anchors, margin=0.05)
+        feasible = anchors.normalize([[0.0, 0.0], [1.0, 3.0], [8.0, 12.0]])
+        self.assertTrue(np.all(feasible > reference))
+        self.assertGreaterEqual(hypervolume_2d(feasible, reference), 0.0)
 
     def test_paired_interval_and_holm_adjustment(self):
         candidate = np.array([2.0, 3.0, 4.0, 5.0])

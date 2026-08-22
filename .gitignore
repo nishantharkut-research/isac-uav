@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Generated experiment outputs and resumable model state.
+runs/
+result/
+results/
+calibrated/
+prepared/
+checkpoints/
+*.pt
+*.pth
+

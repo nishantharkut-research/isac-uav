@@ -33,10 +33,10 @@ reserved before final validation.
 - Published curve ordinates used: no.
 - Communication-rate magnitude used in identification score: no.
 
-The active-power calibration uses an analytical Eq. (18) envelope valid for
+The active-power stress check uses an analytical Eq. (18) envelope valid for
 every allowed active gain and every sensing beamformer satisfying the BS power
-budget. The final limits use half the minimum calibration sensing rate and
-twice the maximum calibration active-power envelope and cascade power.
+budget. `R_min`, `P_a_max`, and `Psi_max` remain disclosed fixed assumptions;
+they are not derived from a candidate's observed rates or powers.
 
 This structural preparation stage deliberately does not use paper curve
 ordinates. The later `calibrate_reproduction.py` stage starts only from its
@@ -92,13 +92,22 @@ The extension implementation was verified without launching full DRL training.
 Focused tests cover vector-reward replay, exact PNG scalarization, immutable
 training-only anchors, Pareto hypervolume, paired intervals, zero-residual
 baseline equivalence, vector Bellman targets, critic uncertainty fallback,
-executed-action replay, deterministic Sobol resume, seed-role separation,
-validation-only gate locking, full checkpoint identity, publication-level
+executed-physical-action replay with aggregate projection diagnostics,
+deterministic Sobol resume, seed-role separation,
+primitive-CSI state sufficiency, atomic next-channel/precoder transitions,
+discounted-return/rate-unit Pareto normalization, validation-only gate locking,
+full checkpoint identity plus internal history/completion and DTL-source-model
+binding, globally
+unique paired evaluation-scene assignment, publication-level
 independent-policy comparison, deterministic same-channel feasibility recovery,
-UAV return reachability/final closure, and hashed plot evidence.
+UAV return reachability/final closure, exact Eq. (9) active-subarray steering
+with a one-aperture disjoint HRIS partition,
+nonleaking training-tail objective references, repeated evaluation evidence,
+and hashed plot evidence.
 
 The validator rejects nonfinite arrays, objective-component inconsistencies,
-post-hoc seed overlap, incomplete preferences, violated UE/target floors,
+post-hoc seed overlap, incomplete preferences, missing or invalid projection
+evidence, violated UE/target floors,
 physical infeasibility, checkpoint or gate-lock drift, pointwise envelopes,
 nonpositive joint-rate confidence bounds, and nonpositive hypervolume confidence
 bounds. These checks establish implementation integrity only. They do not imply
@@ -110,14 +119,16 @@ The final source was checked without DRL training using the complete fast test
 suite and Python bytecode compilation. The suite covers equation contracts,
 power units, SCEE covariance, objective separation, hard feasibility,
 nonmonotone action projection, same-channel recovery, final-slot UAV closure,
-per-stream allocation, raw curve validation,
+per-stream allocation, per-element-power Eq. (16c), CSI-state semantics, source-bound
+preparation/calibration, raw curve validation,
 paired seeds, checkpoint/RNG restoration, holdout provenance, and delivery
-hashes. It also covers both noise mappings, both Equation 30 targets, both
+hashes. It also covers both noise mappings, all three Equation 30 readings, both
 transfer schedules, both WFB replacements, both DDPG comparator CSI readings,
+both CSI-observation readings, both zero-error rate-function readings,
 hypothesis fingerprints, and the
 non-selecting sensitivity plan/report. Hashed plot sidecars cannot mix source,
-profile, seed, power, noise, transfer, schedule, WFB, or DDPG-comparator CSI
-provenance within one
+profile, seed, power, noise, transfer, schedule, WFB, DDPG-comparator CSI,
+CSI-observation, rate-model, or cross-interference provenance within one
 bundle. Numerical curve agreement is deliberately outside this static-test
 claim.
 

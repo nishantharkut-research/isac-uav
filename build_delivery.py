@@ -1,5 +1,6 @@
 """Build the source-only research handoff manifest and ZIP."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -42,7 +43,7 @@ def _sha256(path):
     return digest.hexdigest()
 
 
-def build_delivery():
+def build_delivery(manifest_only=False):
     files = _included_files()
     manifest = {
         "schema_version": 1,
@@ -65,6 +66,9 @@ def build_delivery():
         json.dump(manifest, stream, indent=2, sort_keys=True, allow_nan=False)
         stream.write("\n")
 
+    if manifest_only:
+        return MANIFEST_PATH, None
+
     temporary = ARCHIVE_PATH.with_name(f".{ARCHIVE_PATH.name}.tmp-{os.getpid()}")
     try:
         with zipfile.ZipFile(
@@ -82,6 +86,16 @@ def build_delivery():
 
 
 if __name__ == "__main__":
-    manifest_path, archive_path = build_delivery()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--manifest-only",
+        action="store_true",
+        help="refresh repository hashes without creating a ZIP archive",
+    )
+    args = parser.parse_args()
+    manifest_path, archive_path = build_delivery(
+        manifest_only=args.manifest_only
+    )
     print(f"Manifest: {manifest_path}")
-    print(f"Archive: {archive_path}")
+    if archive_path is not None:
+        print(f"Archive: {archive_path}")

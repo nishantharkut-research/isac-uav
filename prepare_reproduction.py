@@ -22,6 +22,9 @@ def _write_json(path, payload):
 def prepare_reproduction(output_dir, candidate_count=32,
                          generator_seed=cfg.random_seed):
     """Run no-training selection and preflight, then write one authority file."""
+    from source_integrity import source_tree_digest
+
+    source_digest = source_tree_digest()
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     authority_path = output_dir / "reproduction_selection.json"
@@ -37,6 +40,7 @@ def prepare_reproduction(output_dir, candidate_count=32,
         "ready_for_full_run": False,
         "candidate_count": int(candidate_count),
         "generator_seed": int(generator_seed),
+        "source_tree_digest": source_digest,
     }
     _write_json(status_path, status)
 
@@ -56,6 +60,7 @@ def prepare_reproduction(output_dir, candidate_count=32,
             "purpose": "no-training operating-profile selection authority",
             "selected_profile": Path(search["profile_path"]).name,
             "selected_profile_digest": search["profile"].digest,
+            "source_tree_digest": source_digest,
             "selection_rule": (
                 "minimum predeclared structural score among candidates with "
                 "strict calibration feasibility, followed by one disjoint "
@@ -87,6 +92,7 @@ def prepare_reproduction(output_dir, candidate_count=32,
             "ready_for_full_run": True,
             "selected_profile_digest": search["profile"].digest,
             "authority": authority_path.name,
+            "source_tree_digest": source_digest,
         })
         _write_json(status_path, status)
     except Exception as exc:

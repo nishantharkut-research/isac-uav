@@ -8,6 +8,11 @@ from typing import Mapping
 import numpy as np
 
 
+CANONICAL_REFERENCE_PATH = (
+    Path(__file__).resolve().parent / "references" / "paper_reference_curves.json"
+)
+
+
 def _load_payload(source):
     if isinstance(source, Mapping):
         return dict(source)
@@ -15,7 +20,9 @@ def _load_payload(source):
         return json.load(stream)
 
 
-def load_paper_references(source) -> dict:
+def load_paper_references(source=None) -> dict:
+    if source is None:
+        source = CANONICAL_REFERENCE_PATH
     payload = _load_payload(source)
     if int(payload.get("schema_version", -1)) != 1:
         raise ValueError("Unsupported paper-reference schema.")
@@ -67,3 +74,15 @@ def paper_reference_digest(source) -> str:
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def require_canonical_paper_references(source) -> dict:
+    """Return repository references only when ``source`` has identical content."""
+    supplied = load_paper_references(source)
+    canonical = load_paper_references(None)
+    if paper_reference_digest(supplied) != paper_reference_digest(canonical):
+        raise ValueError(
+            "Publication workflows require the repository's canonical paper "
+            "reference payload."
+        )
+    return canonical

@@ -32,21 +32,21 @@ FIGURE_CONTRACTS = {
             CurveSpec("DTL-pCSI", "DTL", "perfect", 40),
             CurveSpec("DTL-WFB", "DTL", "perfect", 40),
             CurveSpec("DTL-iCSI", "DTL", "imperfect", 40),
-            CurveSpec("DDPG", "DDPG", "imperfect", 40),
+            CurveSpec("DDPG", "DDPG", None, 40),
         ),
-        "The published markers span 0..1400 although Table IV reports 1000 episodes; the figure protocol uses 1500 episodes.",
+        "The published markers span 0..1400 although Table IV reports 1000 episodes; the figure protocol uses 1500 episodes. The paper does not disclose the standalone DDPG comparator CSI, so its configured hypothesis is recorded in run metadata.",
     ),
     5: FigureSpec(
         5, "Number of Iterations", tuple(range(1, 21)),
         tuple(CurveSpec(f"L={value}", "AO_SURROGATE", "imperfect", value)
               for value in (30, 20, 10)),
-        "Computed SciPy AO surrogate with a one-step trajectory block; the author CVX/full-trajectory implementation is unavailable.",
+        "Computed fixed-geometry SciPy AO surrogate; the author WMMSE/CVX/full-trajectory implementation is unavailable, and AO iterations are not treated as physical UAV slots.",
     ),
     6: FigureSpec(
         6, "P_T (dB)", (10, 15, 20, 25, 30),
         (
             CurveSpec("DTL-pCSI", "DTL", "perfect", 20),
-            CurveSpec("DDPG", "DDPG", "imperfect", 20),
+            CurveSpec("DDPG", "DDPG", None, 20),
             CurveSpec("AO-pCSI", "AO_SURROGATE", "perfect", 20),
             CurveSpec("DTL-iCSI", "DTL", "imperfect", 20),
             CurveSpec("AO-iCSI", "AO_SURROGATE", "imperfect", 20),

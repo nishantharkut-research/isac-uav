@@ -13,6 +13,7 @@ class ParetoEvidenceTests(unittest.TestCase):
         return hashlib.sha256(path.read_bytes()).hexdigest()
 
     def _bundle(self, root):
+        extension_digest = "f" * 64
         artifacts = []
         for artifact_type in (
             "training_convergence", "primary_paired_delta", "pareto_front"
@@ -28,6 +29,24 @@ class ParetoEvidenceTests(unittest.TestCase):
                 "source_tree_digest": "a" * 64,
                 "profile_digest": "b" * 64,
                 "physical_configuration_fingerprint": "c" * 64,
+                "power_hypothesis_id": "paper_db_as_dbm",
+                "noise_hypothesis_id":
+                    "description_literal_target_matches_ue",
+                "dtl_transfer_mode": "eq30_current_q_bellman_blend",
+                "dtl_transfer_schedule_id": "constant_upsilon",
+                "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
+                "ddpg_comparator_csi_hypothesis_id":
+                    "fair_pcsi_comparator",
+                "los_probability_hypothesis_id":
+                    "paper_unnumbered_los_literal_roles",
+                "channel_coherence_hypothesis_id":
+                    "independent_slot_fading",
+                "csi_observation_hypothesis_id":
+                    "pcsi_instantaneous_icsi_statistical",
+                "rate_model_hypothesis_id":
+                    "continuous_matrix_scee_all_csi_qualities",
+                "cross_function_interference_hypothesis_id":
+                    "paper_eq12_eq14_literal_cross_channels",
                 "baseline_payload_sha256": "d" * 64,
                 "baseline_checkpoint_authority": [{
                     "seed": seed,
@@ -54,9 +73,18 @@ class ParetoEvidenceTests(unittest.TestCase):
                 "image_sha256": self._sha(image),
                 "evidence_sha256": self._sha(evidence),
             })
+        validation = root / "pareto_validation.json"
+        validation.write_text(json.dumps({
+            "validation": "ba_pcdtl_research_extension",
+            "extension_payload_sha256": extension_digest,
+            "overall_pass": True,
+        }), encoding="utf-8")
         (root / "result_manifest.json").write_text(json.dumps({
             "schema_version": 1,
             "kind": "ba_pcdtl_result_manifest",
+            "extension_summary_sha256": extension_digest,
+            "validation": validation.name,
+            "validation_sha256": self._sha(validation),
             "artifacts": artifacts,
         }), encoding="utf-8")
 
@@ -88,6 +116,22 @@ class ParetoEvidenceTests(unittest.TestCase):
             report = validate_pareto_evidence_bundle(root)
             self.assertFalse(report["overall_pass"])
             self.assertIn("mixed provenance", " ".join(report["failures"]))
+
+    def test_missing_rate_model_identity_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._bundle(root)
+            evidence = root / "pareto_front.json"
+            payload = json.loads(evidence.read_text(encoding="utf-8"))
+            del payload["rate_model_hypothesis_id"]
+            evidence.write_text(json.dumps(payload), encoding="utf-8")
+            manifest_path = root / "result_manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["artifacts"][2]["evidence_sha256"] = self._sha(evidence)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            report = validate_pareto_evidence_bundle(root)
+            self.assertFalse(report["overall_pass"])
+            self.assertIn("ambiguity", " ".join(report["failures"]))
 
 
 if __name__ == "__main__":

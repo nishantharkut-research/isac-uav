@@ -274,11 +274,20 @@ def optimize_power_allocation(
     if np.sum(x0) > constraints.total_power:
         x0 *= constraints.total_power / np.sum(x0)
 
+    cached_x = None
+    cached_assessment = None
+
     def assessed(x):
-        return _assess(
+        nonlocal cached_x, cached_assessment
+        candidate = np.asarray(x, dtype=float)
+        if cached_x is not None and np.array_equal(candidate, cached_x):
+            return cached_assessment
+        cached_x = candidate.copy()
+        cached_assessment = _assess(
             x, user_count, target_count, evaluate, constraints,
             objective_spec, method="scipy_slsqp",
         )
+        return cached_assessment
 
     def objective_function(x):
         return -assessed(x).objective_value

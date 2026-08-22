@@ -117,6 +117,34 @@ class EnvironmentFeasibleProjectionTests(unittest.TestCase):
         self.assertEqual(info["action_projection_fraction"], 1.0)
         self.assertTrue(np.allclose(info["executed_action"], proposed))
 
+    def test_uav_kinematic_projection_is_reported_as_action_projection(self):
+        patches = self._patches(lambda *_args, **_kwargs: beam_result(True))
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            env = HRISUAVISACEnv(seed=10)
+            proposed = np.zeros(env.action_dim)
+            proposed[-2:] = 1.0
+            _state, _reward, _done, info = env.step(proposed)
+
+        self.assertTrue(info["action_was_projected"])
+        self.assertTrue(info["uav_action_was_projected"])
+        self.assertFalse(info["signal_controls_were_projected"])
+        self.assertIn("uav_kinematic_projection", info["projection_causes"])
+        self.assertLess(info["action_projection_fraction"], 1.0)
+        self.assertFalse(np.allclose(info["executed_action"], proposed))
+
+    def test_input_box_projection_reduces_the_reported_projection_fraction(self):
+        patches = self._patches(lambda *_args, **_kwargs: beam_result(True))
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            env = HRISUAVISACEnv(seed=10)
+            proposed = np.zeros(env.action_dim)
+            proposed[0] = 2.0
+            _state, _reward, _done, info = env.step(proposed)
+
+        self.assertTrue(info["action_was_projected"])
+        self.assertTrue(info["input_action_was_clipped"])
+        self.assertIn("action_box_projection", info["projection_causes"])
+        self.assertLess(info["action_projection_fraction"], 1.0)
+
     def test_reset_records_an_infeasible_initial_control_without_claiming_success(self):
         patches = self._patches(lambda *_args, **_kwargs: beam_result(False))
         with patches[0], patches[1], patches[2], patches[3], patches[4]:
@@ -195,10 +223,40 @@ class EnvironmentFeasibleProjectionTests(unittest.TestCase):
             env,
             "_build_state",
             return_value=np.zeros(env.state_dim, dtype=np.float32),
+        ), patch.object(
+            cfg,
+            "channel_coherence_hypothesis_id",
+            "episode_block_fading",
+        ), patch.object(
+            cfg,
+            "N_slots",
+            1,
         ):
             env.step(np.zeros(env.action_dim))
 
         self.assertIs(env.ch, selected_channel)
+
+    def test_resampled_next_state_reallocates_precoders_on_its_own_channel(self):
+        selected_channels = []
+
+        def selector(channel, *_args, **_kwargs):
+            selected_channels.append(channel)
+            return beam_result(True)
+
+        patches = self._patches(selector)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patch.object(
+            cfg,
+            "channel_coherence_hypothesis_id",
+            "independent_slot_fading",
+        ):
+            env = HRISUAVISACEnv(seed=10)
+            current_channel = env.ch
+            selected_channels.clear()
+            env.step(np.zeros(env.action_dim))
+
+        self.assertIs(selected_channels[0], current_channel)
+        self.assertIs(selected_channels[-1], env.ch)
+        self.assertIsNot(current_channel, env.ch)
 
     def test_final_slot_projection_cannot_break_uav_closure(self):
         def selector(_ch, _theta, phi, **_kwargs):
@@ -275,10 +333,11 @@ class EnvironmentFeasibleProjectionTests(unittest.TestCase):
             "deterministic_projection_search_exhausted",
         )
 
-    def test_training_replay_uses_executed_not_proposed_action(self):
+    def test_training_replay_uses_executed_physical_action(self):
         for function in (simulation.train_ddpg, simulation.train_dtl):
             source = inspect.getsource(function)
             self.assertIn('info["executed_action"]', source)
+            self.assertNotIn('info["proposed_action"]', source)
 
 
 if __name__ == "__main__":

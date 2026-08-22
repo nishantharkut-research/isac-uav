@@ -162,25 +162,34 @@ def test_full_run_profile_requires_matching_success_authority():
         )
 
     with tempfile.TemporaryDirectory() as directory_name:
+        from source_integrity import source_tree_digest
+
         directory = Path(directory_name)
-        profile = profile_from_mapping(_example_profile())
+        source_digest = source_tree_digest()
+        profile_payload = _example_profile()
+        profile_payload["selection"]["source_tree_digest"] = source_digest
+        profile = profile_from_mapping(profile_payload)
         profile_path = write_profile(
             profile, directory / "identified_profile.json"
         )
         write_json(directory / "parameter_search.json", {
             "selected_profile_digest": profile.digest,
+            "source_tree_digest": source_digest,
         })
         (directory / "parameter_search.npz").write_bytes(b"fixture")
         write_json(directory / "holdout_validation.json", {
             "accepted": True,
+            "source_tree_digest": source_digest,
         })
         write_json(directory / "stress_validation.json", {
             "accepted": True,
             "profile_digest": profile.digest,
+            "source_tree_digest": source_digest,
         })
         write_json(directory / "scientific_preflight.json", {
             "passed": True,
             "parameter_profile": {"digest": profile.digest},
+            "source_tree_digest": source_digest,
         })
         write_json(directory / "reproduction_selection.json", {
             "selected_profile": "identified_profile.json",
@@ -194,6 +203,7 @@ def test_full_run_profile_requires_matching_success_authority():
             "ready_for_full_run": True,
             "paper_curve_ordinates_used": False,
             "communication_rate_magnitude_used_in_selection": False,
+            "source_tree_digest": source_digest,
         })
         status_path = directory / "preparation_status.json"
         write_json(status_path, {
@@ -201,6 +211,7 @@ def test_full_run_profile_requires_matching_success_authority():
             "ready_for_full_run": True,
             "selected_profile_digest": profile.digest,
             "authority": "reproduction_selection.json",
+            "source_tree_digest": source_digest,
         })
 
         loaded = load_prepared_profile(profile_path)
@@ -211,6 +222,7 @@ def test_full_run_profile_requires_matching_success_authority():
             "ready_for_full_run": False,
             "selected_profile_digest": profile.digest,
             "authority": "reproduction_selection.json",
+            "source_tree_digest": source_digest,
         })
         try:
             load_prepared_profile(profile_path)
@@ -277,33 +289,9 @@ def test_structural_candidate_generation_is_deterministic_and_bounded():
         assert np.isclose(values["ue_x_max"] - values["ue_x_min"], 100.0)
         assert np.isclose(values["ue_y_max"] - values["ue_y_min"], 100.0)
         assert values["zeta_los"] < values["zeta_nlos"]
-        assert values["P_a_max"] >= cfg.sigma2_qa
-
-
-def test_constraint_derivation_uses_conservative_extrema_not_rate_level():
-    from parameter_identification import derive_constraint_values
-
-    raw = [
-        {
-            "comm_rate": 1.0 + index,
-            "min_sensing_rate": value,
-            "P_ai": value * 1e-8,
-            "P_ai_envelope": value * 2e-8,
-            "cascade_power": value * 1e-12,
-        }
-        for index, value in enumerate((1.0, 2.0, 3.0, 4.0))
-    ]
-    changed_rates = [dict(row, comm_rate=1000.0 * row["comm_rate"]) for row in raw]
-    first = derive_constraint_values(raw)
-    second = derive_constraint_values(changed_rates)
-    assert first == second
-    assert first["R_min"] == 0.5 * min([1.0, 2.0, 3.0, 4.0])
-    assert np.isclose(first["P_a_max"], 2.0 * max(
-        [2e-8, 4e-8, 6e-8, 8e-8]
-    ))
-    assert np.isclose(first["Psi_max"], 2.0 * max(
-        [1e-12, 2e-12, 3e-12, 4e-12]
-    ))
+        assert values["R_min"] == 0.5
+        assert values["Psi_max"] == 1.0
+        assert values["P_a_max"] == 10.0
 
 
 def test_calibration_and_holdout_seed_sets_are_disjoint():
@@ -336,6 +324,7 @@ def test_structural_score_does_not_optimize_communication_rate_magnitude():
         "cascade_utilization_median": 0.7,
         "comm_rate_cv": 0.1,
         "sensing_rate_cv": 0.1,
+        "comm_action_response_median": 0.01,
         "raw_scenes": [],
         "errors": [],
     }
@@ -362,6 +351,7 @@ def test_structural_score_rejects_nonfinite_or_broken_power_contracts():
         "cascade_utilization_median": 1.0,
         "comm_rate_cv": np.nan,
         "sensing_rate_cv": 0.0,
+        "comm_action_response_median": 0.01,
         "comm_rate_mean": 1.0,
         "sensing_rate_mean": 1.0,
         "raw_scenes": [],
@@ -388,6 +378,7 @@ def test_structural_acceptance_requires_constraint_and_joint_feasibility():
         "active_feasible_fraction": 1.0,
         "cascade_feasible_fraction": 1.0,
         "joint_feasible_fraction": 1.0,
+        "comm_action_response_median": 0.01,
         "errors": [],
     }
     accepted, reasons = structural_acceptance(passing)
@@ -397,6 +388,11 @@ def test_structural_acceptance_requires_constraint_and_joint_feasibility():
     accepted, reasons = structural_acceptance(failing)
     assert accepted is False
     assert "joint" in " ".join(reasons).lower()
+
+    insensitive = dict(passing, comm_action_response_median=0.0)
+    accepted, reasons = structural_acceptance(insensitive)
+    assert accepted is False
+    assert "policy actions" in " ".join(reasons).lower()
 
 
 def test_tiny_structural_evaluation_is_raw_deterministic_and_training_free():

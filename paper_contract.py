@@ -7,6 +7,42 @@ DRL environment and AO baseline cannot silently optimize different objectives.
 import numpy as np
 
 
+FIGURE_6_SYSTEM_CONFIGURATION = {
+    "M": 4,
+    "N": 2,
+    "U": 3,
+    "K": 3,
+    "L": 20,
+    "La": 10,
+    "Lp": 10,
+}
+
+CALIBRATION_SOLVER_SCOPE = (
+    "fixed_geometry_scipy_ao_surrogate_terminal_iterate_"
+    "not_author_algorithms_2_3"
+)
+
+
+def ao_surrogate_contract(config):
+    """Return every fixed numerical choice used by paper AO comparisons."""
+    return {
+        "solver_identity": CALIBRATION_SOLVER_SCOPE,
+        "trajectory_mode": "fixed_geometry",
+        "reported_iterate": "terminal_iterate",
+        "beam_direction_method": "zf_and_matched_filter",
+        "phase_solver": "direct_constrained_slsqp_not_published_sca",
+        "relative_change_tolerance": float(config.ao_tol),
+        "phase_solver_max_iterations": int(config.sca_max_iter),
+        "communication_streams_per_user": 1,
+        "sensing_streams_per_target": 1,
+    }
+
+
+def communication_sum_rate(rate_u) -> float:
+    """Return the communication objective in paper Eq. (16)."""
+    return float(np.sum(rate_u))
+
+
 def joint_sum_rate(rate_u, rate_k) -> float:
     """Return the paper objective value from Eq. (16): sum_u R_u.
 
@@ -14,7 +50,7 @@ def joint_sum_rate(rate_u, rate_k) -> float:
     objective; they enter through the sensing-rate floor constraint.
     The historical function name is kept to avoid breaking older scripts.
     """
-    return float(np.sum(rate_u))
+    return communication_sum_rate(rate_u)
 
 
 def sensing_rate_floor_penalty(rate_k, r_k_min: float) -> float:
@@ -55,21 +91,29 @@ def normalized_constraint_violation(excess: float, limit: float) -> float:
 
 
 def cascade_power_16c(ch, theta) -> float:
-    """Worst-user sum of per-element cascade powers in Eq. (16c)."""
+    """Worst-user sum of per-element cascade powers in Eq. (16c).
+
+    The published summation is outside each squared norm.  Consequently,
+    separate passive-element contributions do not combine coherently and
+    cannot cancel one another through their phases.
+    """
     theta = np.asarray(theta, dtype=complex)
-    return max(
-        float(sum(
-            np.linalg.norm(
-                np.outer(
-                    ch.H_ru_hat[u][:, j] * theta[j],
-                    ch.G_brj_hat[j, :],
-                ),
-                "fro",
-            ) ** 2
-            for j in range(theta.size)
+    g_brj = np.asarray(ch.G_brj_hat, dtype=complex)
+    if theta.ndim != 1 or theta.size != g_brj.shape[0]:
+        raise ValueError("theta must contain one coefficient per passive element")
+    if not ch.H_ru_hat:
+        raise ValueError("Eq. (16c) requires at least one communication user")
+
+    element_weights = np.abs(theta) ** 2 * np.sum(np.abs(g_brj) ** 2, axis=1)
+    user_powers = []
+    for h_ru in ch.H_ru_hat:
+        h_ru = np.asarray(h_ru, dtype=complex)
+        if h_ru.ndim != 2 or h_ru.shape[1] != theta.size:
+            raise ValueError("H_ru must contain one column per passive element")
+        user_powers.append(float(
+            np.sum(np.sum(np.abs(h_ru) ** 2, axis=0) * element_weights)
         ))
-        for u in range(len(ch.H_ru_hat))
-    )
+    return max(user_powers)
 
 
 def cascade_penalty_16c(ch, theta, psi_max: float):

@@ -19,6 +19,11 @@ BUNDLE_PROVENANCE_FIELDS = (
     "dtl_transfer_schedule_id",
     "wfb_hypothesis_id",
     "ddpg_comparator_csi_hypothesis_id",
+    "los_probability_hypothesis_id",
+    "channel_coherence_hypothesis_id",
+    "csi_observation_hypothesis_id",
+    "rate_model_hypothesis_id",
+    "cross_function_interference_hypothesis_id",
     "seeds",
     "paper_reference_sha256",
     "baseline_summary_sha256",
@@ -50,7 +55,7 @@ def _valid_sha256(value):
 def _optional_validation_authority_failures(root, manifest):
     fields = ("validation", "validation_sha256")
     if not any(field in manifest for field in fields):
-        return []
+        return ["result manifest has no passing validation authority"]
     if not all(field in manifest for field in fields):
         return ["result manifest has incomplete validation authority"]
     try:
@@ -64,6 +69,34 @@ def _optional_validation_authority_failures(root, manifest):
         or _sha256(validation_path) != manifest["validation_sha256"]
     ):
         return [f"validation hash mismatch: {validation_path.name}"]
+    try:
+        validation = json.loads(validation_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"invalid validation report {validation_path.name}: {error}"]
+    if validation.get("overall_pass") is not True:
+        return [f"scientific validation did not pass: {validation_path.name}"]
+    authorities = {
+        "baseline_summary_sha256": (
+            "paper_baseline", "baseline_payload_sha256"
+        ),
+        "holdout_summary_sha256": (
+            "paper_calibration_and_holdouts", "holdout_payload_sha256"
+        ),
+        "extension_summary_sha256": (
+            "ba_pcdtl_research_extension", "extension_payload_sha256"
+        ),
+    }
+    present = [field for field in authorities if field in manifest]
+    if len(present) != 1:
+        return ["result manifest has ambiguous summary validation authority"]
+    manifest_field = present[0]
+    validation_kind, validation_digest_field = authorities[manifest_field]
+    if (
+        not _valid_sha256(manifest.get(manifest_field))
+        or validation.get("validation") != validation_kind
+        or validation.get(validation_digest_field) != manifest[manifest_field]
+    ):
+        return [f"validation authority mismatch: {validation_path.name}"]
     return []
 
 
@@ -222,6 +255,12 @@ PARETO_PROVENANCE_FIELDS = (
     "source_tree_digest",
     "profile_digest",
     "physical_configuration_fingerprint",
+    "power_hypothesis_id",
+    "los_probability_hypothesis_id",
+    "channel_coherence_hypothesis_id",
+    "csi_observation_hypothesis_id",
+    "rate_model_hypothesis_id",
+    "cross_function_interference_hypothesis_id",
     "baseline_payload_sha256",
     "baseline_checkpoint_authority",
     "gate_selection_lock_sha256",
@@ -249,6 +288,12 @@ def _pareto_evidence_failures(path):
         failures.append(f"{path.name}: invalid artifact type")
     if payload.get("algorithm_id") != "ba_pcdtl_v1":
         failures.append(f"{path.name}: invalid algorithm identity")
+    if payload.get("power_hypothesis_id") not in {
+        "paper_db_as_dbm", "paper_db_as_dbw"
+    }:
+        failures.append(f"{path.name}: invalid power hypothesis")
+    if not valid_ambiguity_manifest_fields(payload):
+        failures.append(f"{path.name}: invalid ambiguity hypothesis identities")
     for field in (
         "source_tree_digest", "baseline_payload_sha256",
         "gate_selection_lock_sha256",

@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import torch
+
 from run_pareto_extension import (
     _build_baseline_checkpoint_authority,
     create_research_manifest,
@@ -15,6 +17,7 @@ from run_pareto_extension import (
     write_immutable_json,
 )
 from validate_results import result_payload_digest
+from source_integrity import source_model_state_digest
 
 
 def _seeds(start, count):
@@ -27,7 +30,27 @@ class RunnerProtocolTests(unittest.TestCase):
             root = Path(directory)
             source = root / "source.pt"
             target = root / "target.pt"
-            source.write_bytes(b"source checkpoint")
+            source_agent = {
+                "actor": {"weight": torch.tensor([1.0])},
+                "critic": {"weight": torch.tensor([2.0])},
+                "actor_tgt": {"weight": torch.tensor([3.0])},
+                "critic_tgt": {"weight": torch.tensor([4.0])},
+            }
+            source_model_digest = source_model_state_digest(source_agent)
+            identity = {"run_id": "source"}
+            torch.save({
+                "schema_version": 1,
+                "completed_episode": 1,
+                "identity": identity,
+                "identity_canonical": json.dumps(
+                    identity, sort_keys=True, separators=(",", ":")
+                ),
+                "agent": source_agent,
+                "environment": {},
+                "histories": {},
+                "extra": {},
+                "rng": {},
+            }, source)
             target.write_bytes(b"target checkpoint")
 
             import hashlib
@@ -43,6 +66,9 @@ class RunnerProtocolTests(unittest.TestCase):
                     "methods": {"DTL-pCSI": {
                         "checkpoint": target.name,
                         "checkpoint_sha256": target_digest,
+                        "identity": {
+                            "source_model_digest": source_model_digest
+                        },
                     }},
                 }],
             }
@@ -57,6 +83,7 @@ class RunnerProtocolTests(unittest.TestCase):
             "source_checkpoint_sha256": source_digest,
             "dtl_pcsi_checkpoint": target.name,
             "dtl_pcsi_checkpoint_sha256": target_digest,
+            "source_model_digest": source_model_digest,
         }])
 
     def test_seed_roles_are_disjoint_and_sufficient(self):
@@ -71,6 +98,17 @@ class RunnerProtocolTests(unittest.TestCase):
             with self.subTest(bad_roles=bad_roles):
                 with self.assertRaises(ValueError):
                     validate_seed_roles(*bad_roles)
+
+    def test_seed_roles_reject_effective_baseline_training_scene_overlap(self):
+        research = _seeds(0, 10)
+        effective_training = research + [seed + 100_000 for seed in research]
+        with self.assertRaisesRegex(ValueError, "effective training"):
+            validate_seed_roles(
+                research,
+                _seeds(100_000, 5),
+                _seeds(200_000, 10),
+                effective_training_seeds=effective_training,
+            )
 
     def test_preference_and_gate_grids_are_strict(self):
         preferences = parse_preference_grid("1:0,0.5:0.5,0:1")
@@ -128,6 +166,7 @@ class RunnerProtocolTests(unittest.TestCase):
                 "source_checkpoint_sha256": "1" * 64,
                 "dtl_pcsi_checkpoint": f"checkpoints/dtl-{seed}.pt",
                 "dtl_pcsi_checkpoint_sha256": "2" * 64,
+                "source_model_digest": "3" * 64,
             } for seed in _seeds(0, 10)],
             seed_roles=validate_seed_roles(
                 _seeds(0, 10), _seeds(100, 5), _seeds(200, 10)
@@ -148,6 +187,11 @@ class RunnerProtocolTests(unittest.TestCase):
         self.assertEqual(manifest["test_scene_seeds"], _seeds(200, 10))
         self.assertEqual(len(manifest["baseline_checkpoint_authority"]), 10)
         self.assertNotIn("communication_retention_fraction", manifest["objective"])
+        self.assertNotIn("hypervolume_reference_normalized", manifest)
+        self.assertEqual(
+            manifest["hypervolume_reference_rule"]["lock_partition"],
+            "training_only_before_validation",
+        )
 
     def test_gate_selection_order_and_immutable_lock(self):
         candidates = [

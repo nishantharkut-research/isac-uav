@@ -65,13 +65,19 @@ def test_environment_dimensions_follow_paper_defaults():
     env = HRISUAVISACEnv(sigma2_scee=0.0, seed=11)
     expected_state_dim = (
         2 * cfg.Lp + 2 * cfg.La + 3
+        + 1 + 2 * (cfg.U + cfg.K) + 2 * cfg.K
         + 2 * cfg.M * (cfg.U + cfg.K)
-        + 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
+        + 1  # absolute primitive-channel scale
+        + 2 * (
+            cfg.L * cfg.M
+            + cfg.U * cfg.N * (cfg.Lp + cfg.M)
+            + cfg.K * cfg.N * (cfg.La + cfg.M)
+        )
     )
     expected_action_dim = cfg.Lp + 2 * cfg.La + 2
     assert env.state_dim == expected_state_dim
     assert env.action_dim == expected_action_dim
-    assert expected_state_dim == 227
+    assert expected_state_dim == 1047
     assert expected_action_dim == 62
 
 
@@ -88,12 +94,12 @@ def test_paper_objective_and_sensing_constraint_match_eq16():
     assert np.isclose(penalty, 0.4)
 
 
-def test_passive_cascade_power_uses_sum_of_element_powers_from_eq16c():
+def test_passive_cascade_power_sums_per_element_powers_from_eq16c():
     from paper_contract import cascade_power_16c
 
     class CancellationFixture:
-        # The two element contributions are +1 and -1.  A coherent sum has
-        # zero power, while printed Eq. (16c) sums their individual powers.
+        # Eq. (16c) places the squared norm inside the sum over elements, so
+        # opposite phases cannot cancel separate element-power contributions.
         H_ru_hat = [np.array([[1.0, 1.0]], dtype=complex)]
         G_brj_hat = np.array([[1.0], [1.0]], dtype=complex)
 
@@ -101,6 +107,11 @@ def test_passive_cascade_power_uses_sum_of_element_powers_from_eq16c():
         CancellationFixture(), np.array([1.0, -1.0], dtype=complex)
     )
     assert np.isclose(power, 2.0)
+
+    aligned_power = cascade_power_16c(
+        CancellationFixture(), np.array([1.0, 1.0], dtype=complex)
+    )
+    assert np.isclose(aligned_power, power)
 
 
 def test_mobile_targets_are_seeded_bounded_and_reset_to_their_initial_scene():
@@ -292,9 +303,13 @@ def test_scee_rate_uses_matrix_logdet_eq21():
     assert np.isclose(rate_u[0], expected)
 
 
-def test_perfect_csi_default_rate_uses_eq12_to_eq15_path():
+def test_perfect_csi_default_rate_uses_zero_error_eq21_eq25_path():
     from channel_model import ChannelSet
-    from sinr_rate import build_beamformers, compute_rates
+    from sinr_rate import (
+        _compute_scee_rates,
+        build_beamformers,
+        compute_rates,
+    )
 
     pos_uav = np.array([150.0, 100.0, cfg.z_UAV])
     pos_ues = [np.array([30.0 + 50.0 * i, 40.0, 0.0]) for i in range(cfg.U)]
@@ -305,37 +320,69 @@ def test_perfect_csi_default_rate_uses_eq12_to_eq15_path():
     C, T = build_beamformers(channel, theta, phi)
 
     default_rates = compute_rates(channel, theta, phi, C, T)
-    paper_perfect_rates = compute_rates(
-        channel, theta, phi, C, T, use_scee_model=False
+    robust_zero_error_rates = _compute_scee_rates(
+        channel,
+        theta,
+        phi,
+        C,
+        T,
+        channel.composite_ue(theta),
+        channel.composite_te(phi),
     )
-    for default, expected in zip(default_rates, paper_perfect_rates):
+    for default, expected in zip(default_rates, robust_zero_error_rates):
         assert np.allclose(default, expected)
 
 
-def test_scee_estimate_does_not_inflate_channel_power():
+def test_scee_true_channel_adds_the_declared_independent_error_power():
     from channel_model import add_scee
 
     rng = np.random.default_rng(77)
-    true_channel = (
+    estimated_channel = (
         rng.standard_normal(100_000) + 1j * rng.standard_normal(100_000)
     ) / np.sqrt(2.0)
-    estimated = add_scee(true_channel, rho_nmse=0.3, rng=rng)
-    power_ratio = np.mean(np.abs(estimated) ** 2) / np.mean(np.abs(true_channel) ** 2)
-    assert np.isclose(power_ratio, 1.0 / 1.3, atol=0.02)
+    true_channel = add_scee(estimated_channel, rho_nmse=0.3, rng=rng)
+    power_ratio = (
+        np.mean(np.abs(true_channel) ** 2)
+        / np.mean(np.abs(estimated_channel) ** 2)
+    )
+    assert np.isclose(power_ratio, 1.3, atol=0.02)
 
 
 def test_scee_nmse_is_relative_to_estimated_channel_as_defined_on_page_10():
     from channel_model import add_scee
 
     rng = np.random.default_rng(731)
-    true_channel = (
+    estimated_channel = (
         rng.standard_normal(500_000) + 1j * rng.standard_normal(500_000)
     ) / np.sqrt(2.0)
     rho = 0.3
-    estimated = add_scee(true_channel, rho_nmse=rho, rng=rng)
-    error = true_channel - estimated
+    true_channel = add_scee(estimated_channel, rho_nmse=rho, rng=rng)
+    error = true_channel - estimated_channel
     measured_nmse = (
-        np.mean(np.abs(error) ** 2) / np.mean(np.abs(estimated) ** 2)
+        np.mean(np.abs(error) ** 2)
+        / np.mean(np.abs(estimated_channel) ** 2)
+    )
+    assert np.isclose(measured_nmse, rho, atol=0.02)
+
+
+def test_scee_preserves_nonzero_rician_mean_and_zero_mean_error():
+    from channel_model import add_scee
+
+    rng = np.random.default_rng(732)
+    mean = np.full(500_000, 0.5 + 0.25j, dtype=complex)
+    scatter = (
+        rng.standard_normal(mean.size) + 1j * rng.standard_normal(mean.size)
+    ) * np.sqrt(0.75 / 2.0)
+    estimated_channel = mean + scatter
+    rho = 0.2
+    true_channel = add_scee(estimated_channel, rho_nmse=rho, rng=rng)
+    error = true_channel - estimated_channel
+
+    assert np.allclose(np.mean(true_channel), mean[0], atol=5e-3)
+    assert abs(np.mean(error)) < 5e-3
+    measured_nmse = (
+        np.mean(np.abs(error) ** 2)
+        / np.mean(np.abs(estimated_channel) ** 2)
     )
     assert np.isclose(measured_nmse, rho, atol=0.02)
 
@@ -371,12 +418,36 @@ def test_eq18_active_power_sums_elements_and_adds_noise_once():
         cfg.PT = 2.0
         cfg.sigma2_qa = 0.25
         cfg.La = 2
+        C = np.zeros((2, 0), dtype=complex)
         T = np.eye(2, dtype=complex)
         phi = np.array([3.0, 4.0], dtype=complex)
         expected = 9.0 + 4.0 * 16.0 + 0.25
-        assert np.isclose(active_tx_power(ActivePowerFixture(), T, phi), expected)
+        assert np.isclose(
+            active_tx_power(ActivePowerFixture(), C, T, phi), expected
+        )
     finally:
         cfg.PT, cfg.sigma2_qa, cfg.La = old_pt, old_noise, old_la
+
+
+def test_eq18_active_power_includes_communication_and_sensing_waveforms():
+    from sinr_rate import active_tx_power
+
+    class ActivePowerFixture:
+        G_bri_hat = np.array([[1.0, 0.0], [0.0, 2.0]], dtype=complex)
+
+    old_noise, old_la = cfg.sigma2_qa, cfg.La
+    try:
+        cfg.sigma2_qa = 0.25
+        cfg.La = 2
+        C = np.diag([2.0, 0.0]).astype(complex)
+        T = np.diag([0.0, 3.0]).astype(complex)
+        phi = np.array([1.0, 1.0], dtype=complex)
+        expected = 4.0 + 4.0 * 9.0 + 0.25
+        assert np.isclose(
+            active_tx_power(ActivePowerFixture(), C, T, phi), expected
+        )
+    finally:
+        cfg.sigma2_qa, cfg.La = old_noise, old_la
 
 
 def test_eq18_does_not_apply_transmit_power_twice_to_power_normalized_T():
@@ -389,13 +460,14 @@ def test_eq18_does_not_apply_transmit_power_twice_to_power_normalized_T():
     try:
         cfg.sigma2_qa = 0.25
         cfg.La = 2
+        C = np.zeros((2, 0), dtype=complex)
         T = np.eye(2, dtype=complex)
         phi = np.array([3.0, 4.0], dtype=complex)
 
         cfg.PT = 1.0
-        first = active_tx_power(ActivePowerFixture(), T, phi)
+        first = active_tx_power(ActivePowerFixture(), C, T, phi)
         cfg.PT = 10.0
-        second = active_tx_power(ActivePowerFixture(), T, phi)
+        second = active_tx_power(ActivePowerFixture(), C, T, phi)
 
         assert np.isclose(first, second)
         assert np.isclose(first, 9.0 + 4.0 * 16.0 + 0.25)
@@ -413,8 +485,11 @@ def test_eq18_is_zero_when_the_hris_has_no_active_elements():
     try:
         cfg.La = 0
         cfg.sigma2_qa = 0.25
+        C = np.zeros((cfg.M, cfg.U), dtype=complex)
         T = np.zeros((cfg.M, cfg.K), dtype=complex)
-        assert active_tx_power(PassiveOnlyFixture(), T, np.zeros(0)) == 0.0
+        assert active_tx_power(
+            PassiveOnlyFixture(), C, T, np.zeros(0)
+        ) == 0.0
     finally:
         cfg.La, cfg.sigma2_qa = old_la, old_noise
 
@@ -441,8 +516,8 @@ def test_beamformer_selection_enforces_aggregate_active_power_constraint():
             np.ones(cfg.K),
         )
         sinr_rate.sensing_only_sinr = lambda ch, phi, T: np.ones(cfg.K)
-        sinr_rate.active_tx_power = lambda ch, T, phi: float(
-            np.linalg.norm(T, "fro") ** 2
+        sinr_rate.active_tx_power = lambda ch, C, T, phi: float(
+            np.linalg.norm(C, "fro") ** 2 + np.linalg.norm(T, "fro") ** 2
         )
         cfg.P_a_max = 0.5
 
@@ -524,7 +599,6 @@ def test_ao_phase_objective_uses_paper_comm_objective():
 
     old_compute_rates = ao_optimizer.compute_rates
     old_active_power = ao_optimizer.active_tx_power
-    old_current_phi = getattr(ao_optimizer, "_current_phi", None)
     try:
         ao_optimizer.compute_rates = lambda ch, theta, phi, c, t: (
             np.ones(cfg.U),
@@ -532,22 +606,19 @@ def test_ao_phase_objective_uses_paper_comm_objective():
             np.ones(cfg.U),
             np.ones(cfg.K),
         )
-        ao_optimizer.active_tx_power = lambda ch, t, phi: 0.0
-        ao_optimizer._current_phi = np.ones(cfg.La, dtype=complex)
+        ao_optimizer.active_tx_power = lambda ch, c, t, phi: 0.0
         obj = ao_optimizer._scee_phase_objective(
             np.zeros(cfg.Lp),
             FakeChannel(),
             np.zeros((cfg.M, cfg.U), dtype=complex),
             np.zeros((cfg.M, cfg.K), dtype=complex),
             is_passive=True,
+            theta_fixed=np.ones(cfg.Lp, dtype=complex),
+            phi_fixed=np.ones(cfg.La, dtype=complex),
         )
     finally:
         ao_optimizer.compute_rates = old_compute_rates
         ao_optimizer.active_tx_power = old_active_power
-        if old_current_phi is None and hasattr(ao_optimizer, "_current_phi"):
-            delattr(ao_optimizer, "_current_phi")
-        elif old_current_phi is not None:
-            ao_optimizer._current_phi = old_current_phi
 
     expected_comm_objective = -float(cfg.U)
     assert np.isclose(obj, expected_comm_objective)
@@ -571,10 +642,15 @@ def test_eq18_active_power_envelope_bounds_allowed_gain_and_beamformer():
         cfg.La = 2
         cfg.alpha_max = 3.0
         rng = np.random.default_rng(991)
+        C = rng.standard_normal((2, 2)) + 1j * rng.standard_normal((2, 2))
         T = rng.standard_normal((2, 3)) + 1j * rng.standard_normal((2, 3))
-        T *= np.sqrt(cfg.PT) / np.linalg.norm(T, "fro")
+        scale = np.sqrt(cfg.PT) / np.sqrt(
+            np.linalg.norm(C, "fro") ** 2 + np.linalg.norm(T, "fro") ** 2
+        )
+        C *= scale
+        T *= scale
         phi = np.array([1.5 * np.exp(0.3j), 3.0 * np.exp(-0.7j)])
-        assert active_tx_power(ActivePowerFixture(), T, phi) <= (
+        assert active_tx_power(ActivePowerFixture(), C, T, phi) <= (
             active_tx_power_envelope(ActivePowerFixture()) + 1e-12
         )
     finally:

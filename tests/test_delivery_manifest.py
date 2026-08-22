@@ -13,6 +13,7 @@ class DeliveryManifestTests(unittest.TestCase):
         self.assertFalse(manifest["full_training_performed_during_preparation"])
         paths = {item["path"] for item in manifest["files"]}
         self.assertIn("REPRODUCTION_GUIDE.md", paths)
+        self.assertIn("E2E_CORRECTION_REPORT.md", paths)
         self.assertIn(
             "Hybrid-RIS_Empowered_UAV-Assisted_ISAC_Systems_Transfer_Learning-Based_DRL.pdf",
             paths,

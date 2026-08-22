@@ -10,7 +10,7 @@ class AOHardConstraintTests(unittest.TestCase):
         self.assertNotIn("rate_penalty_weight", source)
         self.assertNotIn("cascade_penalty_weight", source)
         self.assertNotIn("active_penalty_weight", source)
-        self.assertIn("joint_sum_rate", source)
+        self.assertIn("communication_sum_rate", source)
 
     def test_phase_and_trajectory_solvers_use_explicit_slsqp_constraints(self):
         passive = inspect.getsource(ao_optimizer.solve_passive_phases)
@@ -23,7 +23,7 @@ class AOHardConstraintTests(unittest.TestCase):
     def test_raw_ao_score_has_no_penalty_subtraction(self):
         source = inspect.getsource(ao_optimizer._score_beamformers)
         self.assertNotIn("penalty", source)
-        self.assertIn("joint_sum_rate", source)
+        self.assertIn("communication_sum_rate", source)
 
 
 if __name__ == "__main__":

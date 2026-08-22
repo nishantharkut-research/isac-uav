@@ -39,14 +39,33 @@ class ResultEvidenceTests(unittest.TestCase):
                 "dtl_transfer_schedule_id": "constant_upsilon",
                 "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
                 "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
+                "los_probability_hypothesis_id":
+                    "paper_unnumbered_los_literal_roles",
+                "channel_coherence_hypothesis_id": "episode_block_fading",
+                "csi_observation_hypothesis_id":
+                    "pcsi_instantaneous_icsi_statistical",
+                "rate_model_hypothesis_id":
+                    "continuous_matrix_scee_all_csi_qualities",
+                "cross_function_interference_hypothesis_id":
+                    "paper_eq12_eq14_literal_cross_channels",
                 "seeds": [1, 2, 3, 4, 5],
                 "units": {"x": "episodes", "reward": "bits/s/Hz"},
                 "arrays": {"x": [0, 1], "DTL-pCSI": [1.0, 2.0]},
                 "feasibility_rate": 1.0,
             }), encoding="utf-8")
+            summary_digest = "b" * 64
+            validation = root / "baseline_validation.json"
+            validation.write_text(json.dumps({
+                "validation": "paper_baseline",
+                "baseline_payload_sha256": summary_digest,
+                "overall_pass": True,
+            }), encoding="utf-8")
             manifest = {
                 "schema_version": 1,
                 "kind": "generated_result_manifest",
+                "baseline_summary_sha256": summary_digest,
+                "validation": validation.name,
+                "validation_sha256": self._sha256(validation),
                 "artifacts": [{
                     "image": image.name,
                     "evidence": evidence.name,
@@ -59,6 +78,19 @@ class ResultEvidenceTests(unittest.TestCase):
             )
             report = validate_result_evidence_bundle(root)
             self.assertTrue(report["overall_pass"], report["failures"])
+
+            validation.write_text(json.dumps({
+                "validation": "paper_baseline",
+                "baseline_payload_sha256": summary_digest,
+                "overall_pass": False,
+            }), encoding="utf-8")
+            manifest["validation_sha256"] = self._sha256(validation)
+            (root / "result_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            report = validate_result_evidence_bundle(root)
+            self.assertFalse(report["overall_pass"])
+            self.assertIn("did not pass", " ".join(report["failures"]))
 
     def test_missing_or_unknown_ambiguity_identity_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -78,6 +110,15 @@ class ResultEvidenceTests(unittest.TestCase):
                 "dtl_transfer_mode": "eq30_current_q_bellman_blend",
                 "dtl_transfer_schedule_id": "constant_upsilon",
                 "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
+                "los_probability_hypothesis_id":
+                    "paper_unnumbered_los_literal_roles",
+                "channel_coherence_hypothesis_id": "episode_block_fading",
+                "csi_observation_hypothesis_id":
+                    "pcsi_instantaneous_icsi_statistical",
+                "rate_model_hypothesis_id":
+                    "continuous_matrix_scee_all_csi_qualities",
+                "cross_function_interference_hypothesis_id":
+                    "paper_eq12_eq14_literal_cross_channels",
                 "seeds": [1, 2, 3, 4, 5],
                 "units": {"x": "episodes"},
                 "arrays": {"x": [0]},
@@ -116,6 +157,15 @@ class ResultEvidenceTests(unittest.TestCase):
                 "dtl_transfer_schedule_id": "constant_upsilon",
                 "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
                 "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
+                "los_probability_hypothesis_id":
+                    "paper_unnumbered_los_literal_roles",
+                "channel_coherence_hypothesis_id": "episode_block_fading",
+                "csi_observation_hypothesis_id":
+                    "pcsi_instantaneous_icsi_statistical",
+                "rate_model_hypothesis_id":
+                    "continuous_matrix_scee_all_csi_qualities",
+                "cross_function_interference_hypothesis_id":
+                    "paper_eq12_eq14_literal_cross_channels",
                 "seeds": [1, 2, 3],
                 "units": {"x": "episodes"},
                 "arrays": {"x": [0]},
@@ -160,6 +210,16 @@ class ResultEvidenceTests(unittest.TestCase):
                     "wfb_hypothesis_id": wfb,
                     "ddpg_comparator_csi_hypothesis_id":
                         "fair_pcsi_comparator",
+                    "los_probability_hypothesis_id":
+                        "paper_unnumbered_los_literal_roles",
+                    "channel_coherence_hypothesis_id":
+                        "episode_block_fading",
+                    "csi_observation_hypothesis_id":
+                        "pcsi_instantaneous_icsi_statistical",
+                    "rate_model_hypothesis_id":
+                        "continuous_matrix_scee_all_csi_qualities",
+                    "cross_function_interference_hypothesis_id":
+                        "paper_eq12_eq14_literal_cross_channels",
                     "seeds": [1, 2, 3, 4, 5],
                     "units": {"x": "episode"},
                     "arrays": {"x": [0]},

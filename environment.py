@@ -11,6 +11,7 @@ MDP tuple  (S, A, P, R):
 """
 from dataclasses import dataclass
 
+from ambiguity_hypotheses import csi_observes_instantaneous
 from config import cfg
 import numpy as np
 from channel_model import ChannelSet
@@ -101,14 +102,16 @@ class HRISUAVISACEnv:
       [Re(e^{jθ}), Im(e^{jθ}),          # 2 Lp  passive phase shifts
        Re(ϕ),      Im(ϕ),                # 2 La  active phase shifts
        pos_UAV / pos_max,                 # 3    UAV position (normalised)
+       time, UE/target positions, target velocities,
        Re(C,T), Im(C,T),                  # precoding matrices
-       Re(H_u,H_k), Im(H_u,H_k)]          # full composite channel matrices
+       Re/Im of estimated primitive channel tensors]
     """
 
     def __init__(self, sigma2_scee: float = None, seed: int = None,
                  use_capon=None, sensing_rate_min: float = None,
                  sensing_only_sinr_min: float = 0.0,
                  csi_observation_fraction: float = 1.0,
+                 observe_instantaneous_csi: bool = None,
                  objective_spec: ObjectiveSpec = None,
                  allocation_mode: str = "fast",
                  sensing_beamformer_mode=None):
@@ -132,6 +135,17 @@ class HRISUAVISACEnv:
         self.objective_spec = objective_spec
         self.sensing_rate_min = objective_spec.target_rate_min
         self.sensing_only_sinr_min = float(sensing_only_sinr_min)
+        effective_scee = cfg.rho_nmse if sigma2_scee is None else sigma2_scee
+        observation_quality = (
+            "partial" if float(csi_observation_fraction) < 1.0
+            else "perfect" if float(effective_scee) <= 0.0
+            else "imperfect"
+        )
+        self.observe_instantaneous_csi = (
+            csi_observes_instantaneous(cfg, observation_quality)
+            if observe_instantaneous_csi is None
+            else bool(observe_instantaneous_csi)
+        )
         self.csi_observation_fraction = float(csi_observation_fraction)
         if allocation_mode not in {"fast", "scipy"}:
             raise ValueError("allocation_mode must be 'fast' or 'scipy'.")
@@ -142,22 +156,44 @@ class HRISUAVISACEnv:
         self._channel_rng = np.random.default_rng(seed)
 
         self.action_dim = cfg.Lp + cfg.La + cfg.La + 2
-        self.state_dim = (
-            2 * cfg.Lp + 2 * cfg.La + 3
-            + 2 * cfg.M * (cfg.U + cfg.K)
-            + 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
+        primitive_complex_coefficients = (
+            cfg.L * cfg.M
+            + cfg.U * cfg.N * (cfg.Lp + cfg.M)
+            + cfg.K * cfg.N * (cfg.La + cfg.M)
         )
-        channel_feature_count = 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
-        visible_count = int(round(
-            self.csi_observation_fraction * channel_feature_count
-        ))
-        self.csi_observation_mask = np.zeros(channel_feature_count, dtype=bool)
-        mask_order = np.random.default_rng(17_291).permutation(channel_feature_count)
-        self.csi_observation_mask[mask_order[:visible_count]] = True
+        channel_feature_count = 2 * primitive_complex_coefficients
+        self.time_feature_index = 2 * cfg.Lp + 2 * cfg.La + 3
+        geometry_feature_count = 2 * (cfg.U + cfg.K) + 2 * cfg.K
+        self.precoder_feature_index = (
+            self.time_feature_index + 1 + geometry_feature_count
+        )
+        self.csi_scale_feature_index = (
+            self.precoder_feature_index + 2 * cfg.M * (cfg.U + cfg.K)
+            if self.observe_instantaneous_csi else None
+        )
+        self.state_dim = (
+            self.precoder_feature_index
+            + 2 * cfg.M * (cfg.U + cfg.K)
+            + (
+                1 + channel_feature_count
+                if self.observe_instantaneous_csi else 0
+            )
+        )
+        visible_complex_count = int(round(
+            self.csi_observation_fraction * primitive_complex_coefficients
+        )) if self.observe_instantaneous_csi else 0
+        complex_mask = np.zeros(primitive_complex_coefficients, dtype=bool)
+        mask_order = np.random.default_rng(17_291).permutation(
+            primitive_complex_coefficients
+        )
+        complex_mask[mask_order[:visible_complex_count]] = True
+        self.csi_observation_mask = np.concatenate([
+            complex_mask, complex_mask
+        ])
 
         self._init_scene()
         self.uav_pos = self._uav_start.copy()
-        self._refresh_channel()
+        self._episode_channel_seed = None
         self.reset()
 
     # ── Scene setup ───────────────────────────────────────────────────────────
@@ -176,8 +212,8 @@ class HRISUAVISACEnv:
         )
         self.pos_tes = rand_gnd(
             cfg.K,
-            (cfg.x_min, cfg.y_min),
-            (cfg.x_max, cfg.y_max),
+            (cfg.target_x_min, cfg.target_y_min),
+            (cfg.target_x_max, cfg.target_y_max),
         )
         self._tes_initial = [position.copy() for position in self.pos_tes]
         target_angles = self._rng.uniform(0.0, 2.0 * np.pi, cfg.K)
@@ -188,8 +224,8 @@ class HRISUAVISACEnv:
         ])
         self._tes_velocity_initial = self._tes_velocity.copy()
         self._uav_start = np.array([
-            (cfg.x_min + cfg.x_max) / 2,
-            (cfg.y_min + cfg.y_max) / 2,
+            cfg.uav_start_x,
+            cfg.uav_start_y,
             cfg.z_UAV
         ], dtype=float)
 
@@ -199,13 +235,17 @@ class HRISUAVISACEnv:
         """Start a new episode; return initial state.
 
         User/target geometry returns to the seeded initial scene. A fresh
-        channel realization is sampled at reset and after each movement step.
+        latent channel realization is sampled at reset; the declared coherence
+        hypothesis controls whether it is reused after movement steps.
         """
         self.t       = 0
         self.uav_pos = self._uav_start.copy()
         self.pos_tes = [position.copy() for position in self._tes_initial]
         self._tes_velocity = self._tes_velocity_initial.copy()
-        self._refresh_channel()
+        self._episode_channel_seed = int(
+            self._channel_rng.integers(0, 2**32 - 1)
+        )
+        self._refresh_channel(self._episode_channel_seed)
 
         # Canonical initial HRIS configuration (all phases = 0, half-power active).
         self.theta_phase = np.zeros(cfg.Lp)
@@ -214,25 +254,16 @@ class HRISUAVISACEnv:
 
         self.last_sum_rate = 0.0
 
-        # Recompute _ch_scale for canonical phases on the FIXED channel.
-        theta_c = np.exp(1j * self.theta_phase)
-        phi_c   = self.alpha * np.exp(1j * self.phi_phase)
-        H_bar_u = self.ch.composite_ue(theta_c)
-        H_bar_k = self.ch.composite_te(phi_c)
-        h_all = np.concatenate([H.ravel() for H in H_bar_u + H_bar_k])
-        self._ch_scale = (float(np.linalg.norm(h_all))
-                          / np.sqrt(cfg.N * cfg.M * (cfg.U + cfg.K)) + 1e-12)
-        self.C, self.T, self.beam_info = select_feasible_beamformers(
-            self.ch, theta_c, phi_c,
-            sensing_rate_min=self.sensing_rate_min,
-            sensing_only_sinr_min=self.sensing_only_sinr_min,
-            sensing_beamformer_mode=self.sensing_beamformer_mode,
-            objective_spec=self.objective_spec,
-            allocation_mode=self.allocation_mode,
+        # One episode-level scale preserves relative gains among primitive
+        # links while keeping the neural-network input numerically bounded.
+        h_all = self._estimated_primitive_channel_coefficients()
+        self._ch_scale = (
+            float(np.linalg.norm(h_all)) / np.sqrt(h_all.size) + 1e-12
         )
-        assessment = self._assess_current_solution(
-            self.C, self.T, self.beam_info
-        )
+        assessment = self._allocate_current_channel()
+        self.C = assessment["C"]
+        self.T = assessment["T"]
+        self.beam_info = assessment["beam_info"]
         # Reset has no executed action or reward. Keep its feasibility explicit;
         # the first transition may still find a feasible proposed control. No
         # infeasible control is ever returned by step().
@@ -246,7 +277,7 @@ class HRISUAVISACEnv:
 
     def step(self, action: np.ndarray):
         """
-        Apply action, advance channel, compute reward.
+        Apply an action, score it on the observed channel, then advance state.
 
         Returns
         -------
@@ -261,13 +292,22 @@ class HRISUAVISACEnv:
                 f"action must contain {self.action_dim} finite values"
             )
         proposed_action = np.clip(action, -1.0, 1.0)
+        input_action_was_clipped = not np.allclose(
+            action, proposed_action, rtol=0.0, atol=1e-12
+        )
         previous_controls = self._snapshot_controls()
         proposed_controls = self._controls_from_action(
             previous_controls, proposed_action
         )
-        self._advance_targets()
-        slot_time_s = (self.t + 1) * cfg.delta_T
-        channel_seed = int(self._channel_rng.integers(0, 2**32 - 1))
+        slot_time_s = self.t * cfg.delta_T
+        from ambiguity_hypotheses import get_channel_coherence_hypothesis
+
+        coherence = get_channel_coherence_hypothesis(
+            cfg.channel_coherence_hypothesis_id
+        )
+        # This realization was exposed by reset() or the preceding step. The
+        # selected action must be evaluated on the channel present in its state.
+        channel_seed = int(self._episode_channel_seed)
         previous_powers = self.beam_info.get("stream_powers")
         controls, assessment, projection_fraction = self._find_feasible_controls(
             previous_controls,
@@ -297,10 +337,71 @@ class HRISUAVISACEnv:
         executed_action = self._action_from_controls(
             previous_controls, controls
         )
+        action_changed = not np.allclose(
+            proposed_action, executed_action, rtol=0.0, atol=1e-10
+        )
+        signal_controls_were_projected = bool(
+            projection_fraction < 1.0 - 1e-12
+        )
+        uav_action_was_projected = not np.allclose(
+            proposed_action[-2:], executed_action[-2:],
+            rtol=0.0, atol=1e-10,
+        )
+        projection_causes = []
+        if input_action_was_clipped:
+            projection_causes.append("action_box_projection")
+        if signal_controls_were_projected:
+            projection_causes.append("signal_control_feasibility_projection")
+        if uav_action_was_projected:
+            projection_causes.append("uav_kinematic_projection")
+        if assessment.get("projection_source") == "deterministic_recovery":
+            projection_causes.append("deterministic_recovery")
+        action_was_projected = bool(
+            input_action_was_clipped or action_changed
+        )
+        action_match_fraction = float(np.clip(
+            1.0 - np.linalg.norm(proposed_action - executed_action)
+            / (2.0 * np.sqrt(self.action_dim)),
+            0.0,
+            1.0,
+        ))
+        input_action_match_fraction = 1.0
+        if input_action_was_clipped:
+            input_action_match_fraction = float(np.clip(
+                1.0 - np.linalg.norm(action - proposed_action)
+                / max(
+                    np.linalg.norm(action) + np.linalg.norm(proposed_action),
+                    1e-15,
+                ),
+                0.0,
+                1.0,
+            ))
+        aggregate_projection_fraction = min(
+            float(projection_fraction),
+            action_match_fraction,
+            input_action_match_fraction,
+        )
 
         self.last_sum_rate = sum_r
         self.t += 1
         done    = self.t >= cfg.N_slots
+
+        if not done:
+            self._advance_targets()
+            if coherence.resample_each_slot:
+                self._episode_channel_seed = int(
+                    self._channel_rng.integers(0, 2**32 - 1)
+                )
+            self._refresh_channel(
+                self._episode_channel_seed,
+                slot_time_s=self.t * cfg.delta_T,
+            )
+            next_assessment = self._allocate_current_channel(
+                previous_powers=beam_info.get("stream_powers")
+            )
+            self.C = next_assessment["C"]
+            self.T = next_assessment["T"]
+            self.beam_info = next_assessment["beam_info"]
 
         return (self._build_state(),
                 reward,
@@ -333,12 +434,20 @@ class HRISUAVISACEnv:
                      P_ai=assessment["active_power"],
                      proposed_action=proposed_action.copy(),
                      executed_action=executed_action,
-                     action_projection_fraction=projection_fraction,
-                     action_was_projected=bool(projection_fraction < 1.0 - 1e-12),
+                     action_projection_fraction=aggregate_projection_fraction,
+                     action_was_projected=action_was_projected,
+                     signal_control_projection_fraction=float(projection_fraction),
+                     input_action_projection_fraction=input_action_match_fraction,
+                     signal_controls_were_projected=
+                         signal_controls_were_projected,
+                     uav_action_was_projected=uav_action_was_projected,
+                     input_action_was_clipped=input_action_was_clipped,
+                     projection_causes=projection_causes,
                      projection_source=assessment.get(
                          "projection_source", "externally_selected"
                      ),
                      projection_channel_seed=channel_seed,
+                     channel_coherence_hypothesis_id=coherence.identifier,
                      channel_time_s=slot_time_s,
                      uav_bounds_ok=assessment.get(
                          "uav_bounds_ok", trajectory["uav_bounds_ok"]
@@ -420,7 +529,21 @@ class HRISUAVISACEnv:
     def _evaluate_controls(self, controls, channel_seed, previous_powers,
                            slot_time_s, previous_controls=None):
         self._apply_controls(controls)
-        self._refresh_channel(channel_seed, slot_time_s=slot_time_s)
+        if int(channel_seed) != int(self._episode_channel_seed):
+            raise RuntimeError("Control evaluation channel seed mismatch.")
+        expected_time = self.t * cfg.delta_T
+        if not np.isclose(float(slot_time_s), expected_time):
+            raise RuntimeError("Control evaluation slot time mismatch.")
+        assessment = self._allocate_current_channel(previous_powers)
+        trajectory = self._trajectory_diagnostics(controls, previous_controls)
+        assessment.update(trajectory)
+        assessment["physical_feasible"] = bool(
+            assessment["physical_feasible"] and trajectory["uav_feasible"]
+        )
+        return assessment
+
+    def _allocate_current_channel(self, previous_powers=None):
+        """Allocate and assess precoders for exactly ``self.ch`` and controls."""
         theta = np.exp(1j * self.theta_phase)
         phi = self.alpha * np.exp(1j * self.phi_phase)
         C, T, beam_info = select_feasible_beamformers(
@@ -457,11 +580,6 @@ class HRISUAVISACEnv:
             beam_info["allocation_fallback_used"] = True
         else:
             beam_info["allocation_fallback_used"] = False
-        trajectory = self._trajectory_diagnostics(controls, previous_controls)
-        assessment.update(trajectory)
-        assessment["physical_feasible"] = bool(
-            assessment["physical_feasible"] and trajectory["uav_feasible"]
-        )
         return assessment
 
     def _trajectory_diagnostics(self, controls, previous_controls):
@@ -517,7 +635,7 @@ class HRISUAVISACEnv:
         cascade_penalty, cascade_ok, cascade_power = cascade_penalty_16c(
             self.ch, theta, cfg.Psi_max
         )
-        active_power = active_tx_power(self.ch, T, phi)
+        active_power = active_tx_power(self.ch, C, T, phi)
         active_penalty, active_ok = active_power_penalty(
             active_power, cfg.P_a_max
         )
@@ -721,7 +839,19 @@ class HRISUAVISACEnv:
             "episode_boundary": bool(self.t in {0, cfg.N_slots}),
             "objective_spec": self.objective_spec.as_dict(),
             "allocation_mode": self.allocation_mode,
+            "hris_partition_mode": cfg.hris_partition_mode,
             "sensing_beamformer_mode": self.sensing_beamformer_mode,
+            "channel_coherence_hypothesis_id":
+                cfg.channel_coherence_hypothesis_id,
+            "csi_observation_hypothesis_id":
+                cfg.csi_observation_hypothesis_id,
+            "rate_model_hypothesis_id": cfg.rate_model_hypothesis_id,
+            "observe_instantaneous_csi": bool(self.observe_instantaneous_csi),
+            "csi_observation_fraction": float(self.csi_observation_fraction),
+            "sensing_only_sinr_min": float(self.sensing_only_sinr_min),
+            "cross_function_interference_hypothesis_id":
+                cfg.cross_function_interference_hypothesis_id,
+            "episode_channel_seed": int(self._episode_channel_seed),
             "t": int(self.t),
             "uav_pos": self.uav_pos.copy(),
             "uav_start": self._uav_start.copy(),
@@ -746,9 +876,52 @@ class HRISUAVISACEnv:
             raise ValueError("Environment objective mismatch in checkpoint.")
         if state.get("allocation_mode") != self.allocation_mode:
             raise ValueError("Environment allocation mode mismatch in checkpoint.")
+        if state.get("hris_partition_mode") != cfg.hris_partition_mode:
+            raise ValueError("Environment HRIS partition mismatch in checkpoint.")
         if state.get("sensing_beamformer_mode") != self.sensing_beamformer_mode:
             raise ValueError(
                 "Environment sensing-beamformer mode mismatch in checkpoint."
+            )
+        if state.get("channel_coherence_hypothesis_id") != (
+            cfg.channel_coherence_hypothesis_id
+        ):
+            raise ValueError(
+                "Environment channel-coherence hypothesis mismatch in checkpoint."
+            )
+        if state.get("csi_observation_hypothesis_id") != (
+            cfg.csi_observation_hypothesis_id
+        ):
+            raise ValueError(
+                "Environment CSI-observation hypothesis mismatch in checkpoint."
+            )
+        if "observe_instantaneous_csi" not in state or bool(
+            state["observe_instantaneous_csi"]
+        ) != bool(
+            self.observe_instantaneous_csi
+        ) or not np.isclose(
+            float(state.get("csi_observation_fraction", np.nan)),
+            self.csi_observation_fraction,
+        ):
+            raise ValueError(
+                "Environment CSI-observation configuration mismatch in checkpoint."
+            )
+        if not np.isclose(
+            float(state.get("sensing_only_sinr_min", np.nan)),
+            self.sensing_only_sinr_min,
+        ):
+            raise ValueError(
+                "Environment sensing-only SINR floor mismatch in checkpoint."
+            )
+        if state.get("rate_model_hypothesis_id") != cfg.rate_model_hypothesis_id:
+            raise ValueError(
+                "Environment rate-model hypothesis mismatch in checkpoint."
+            )
+        if state.get("cross_function_interference_hypothesis_id") != (
+            cfg.cross_function_interference_hypothesis_id
+        ):
+            raise ValueError(
+                "Environment cross-function interference hypothesis mismatch "
+                "in checkpoint."
             )
         if state.get("episode_boundary") is not True:
             raise ValueError("Environment checkpoint is not at an episode boundary.")
@@ -798,6 +971,15 @@ class HRISUAVISACEnv:
         last_sum_rate = float(state["last_sum_rate"])
         if not np.isfinite(last_sum_rate):
             raise ValueError("Invalid environment checkpoint field: last_sum_rate.")
+        episode_channel_seed = state.get("episode_channel_seed")
+        if (
+            isinstance(episode_channel_seed, bool)
+            or not isinstance(episode_channel_seed, (int, np.integer))
+            or not 0 <= int(episode_channel_seed) < 2**32
+        ):
+            raise ValueError(
+                "Invalid environment checkpoint field: episode_channel_seed."
+            )
 
         self.t = t
         self.uav_pos = uav_pos
@@ -811,13 +993,14 @@ class HRISUAVISACEnv:
         self.phi_phase = phi_phase
         self.alpha = alpha
         self.last_sum_rate = last_sum_rate
+        self._episode_channel_seed = int(episode_channel_seed)
         self._rng.bit_generator.state = state["rng_state"]
         self._channel_rng.bit_generator.state = state["channel_rng_state"]
 
     def _advance_targets(self):
         """Advance low-mobility targets and reflect them at area boundaries."""
-        low = np.array([cfg.x_min, cfg.y_min], dtype=float)
-        high = np.array([cfg.x_max, cfg.y_max], dtype=float)
+        low = np.array([cfg.target_x_min, cfg.target_y_min], dtype=float)
+        high = np.array([cfg.target_x_max, cfg.target_y_max], dtype=float)
         for index, position in enumerate(self.pos_tes):
             next_xy = position[:2] + self._tes_velocity[index, :2] * cfg.delta_T
             for axis in range(2):
@@ -832,51 +1015,103 @@ class HRISUAVISACEnv:
 
     def _build_state(self) -> np.ndarray:
         """
-        State vector (with channel CSI, Sec. III):
+        State vector (Sec. III):
           s = [Re/Im of passive & active phase vectors,
                normalised UAV position,
                Re/Im of C and T,
-               Re/Im of full per-user and per-target composite channels]
+               Re/Im of the estimated primitive channel tensors]
 
-        For pCSI (sigma2=0): effective channels from perfect estimates.
-        For iCSI (sigma2>0): effective channels from SCEE-noisy estimates.
-        The estimated channels are already in self.ch (built at reset/refresh).
+        Primitive tensors are independent of the currently selected HRIS
+        phases, so the agent can evaluate alternative phase actions from its
+        observation. Statistical CSI contains phases, UAV position, and
+        precoders only. ParCSI uses a deterministic coefficient mask.
         """
         theta_c = np.exp(1j * self.theta_phase)              # (Lp,)
         phi_c   = self.alpha * np.exp(1j * self.phi_phase)   # (La,)
 
         pos_norm = self.uav_pos / np.array([cfg.x_max, cfg.y_max,
                                              cfg.z_UAV + 1.0])
+        time_fraction = np.array([
+            np.clip(float(self.t) / float(cfg.N_slots), 0.0, 1.0)
+        ])
+
+        def normalized_xy(positions, x_min, x_max, y_min, y_max):
+            scale = np.array([
+                max(float(x_max - x_min), 1e-12),
+                max(float(y_max - y_min), 1e-12),
+            ])
+            low = np.array([x_min, y_min], dtype=float)
+            return np.concatenate([
+                2.0 * (np.asarray(position[:2]) - low) / scale - 1.0
+                for position in positions
+            ])
+
+        ue_geometry = normalized_xy(
+            self.pos_ues,
+            cfg.ue_x_min, cfg.ue_x_max,
+            cfg.ue_y_min, cfg.ue_y_max,
+        )
+        target_geometry = normalized_xy(
+            self.pos_tes,
+            cfg.target_x_min, cfg.target_x_max,
+            cfg.target_y_min, cfg.target_y_max,
+        )
+        velocity_scale = max(float(cfg.target_speed_mps), 1e-12)
+        target_velocities = (
+            self._tes_velocity[:, :2].reshape(-1) / velocity_scale
+        )
         _a_max = cfg.alpha_max + 1e-9
 
-        H_bar_u = self.ch.composite_ue(theta_c)               # list[U] of (N,M)
-        H_bar_k = self.ch.composite_te(phi_c)                 # list[K] of (N,M)
-        h_eff_u = np.concatenate([H.ravel() for H in H_bar_u])
-        h_eff_k = np.concatenate([H.ravel() for H in H_bar_k])
         precoders = np.concatenate([self.C.ravel(), self.T.ravel()])
         precoder_scale = np.sqrt(max(cfg.PT, 1e-12))
 
         # Use episode-level scale (fixed at reset from random-phase h_eff).
         # As phases improve within the episode, h_eff magnitude grows relative
         # to this baseline — giving the DRL a visible within-episode reward signal.
-        observed_channels = np.concatenate([
-            h_eff_u.real / self._ch_scale,
-            h_eff_u.imag / self._ch_scale,
-            h_eff_k.real / self._ch_scale,
-            h_eff_k.imag / self._ch_scale,
-        ])
-        observed_channels = np.where(
-            self.csi_observation_mask, observed_channels, 0.0
-        )
+        observed_channels = np.empty(0, dtype=float)
+        channel_scale = np.empty(0, dtype=float)
+        if self.observe_instantaneous_csi:
+            channel_scale = np.array([
+                np.log10(max(float(self._ch_scale), 1e-300)) / 10.0
+            ])
+            primitive = self._estimated_primitive_channel_coefficients()
+            observed_channels = np.concatenate([
+                primitive.real / self._ch_scale,
+                primitive.imag / self._ch_scale,
+            ])
+            observed_channels = np.where(
+                self.csi_observation_mask, observed_channels, 0.0
+            )
 
         s = np.concatenate([
             theta_c.real, theta_c.imag,                          # 2 Lp  ∈ [-1, 1]
             phi_c.real / _a_max, phi_c.imag / _a_max,           # 2 La  ∈ [-1, 1]
             pos_norm,                                             # 3
+            time_fraction,
+            ue_geometry, target_geometry, target_velocities,
             precoders.real / precoder_scale,
             precoders.imag / precoder_scale,
+            channel_scale,
             observed_channels,
             # last_sum_rate removed: it created Q(s,a)≈f(LSR) degeneracy that
             # prevented the critic from learning action-dependent structure.
         ])
         return s.astype(np.float32)
+
+    def _estimated_primitive_channel_coefficients(self) -> np.ndarray:
+        """Flatten every estimated channel needed to form Eqs. (10)-(11)."""
+        blocks = [
+            self.ch.G_brj_hat,
+            self.ch.G_bri_hat,
+            *self.ch.H_bu_hat,
+            *self.ch.H_ru_hat,
+            *self.ch.H_bk_hat,
+            *self.ch.H_rt_hat,
+        ]
+        coefficients = np.concatenate([
+            np.asarray(block, dtype=complex).ravel() for block in blocks
+        ])
+        expected = self.csi_observation_mask.size // 2
+        if coefficients.size != expected or not np.all(np.isfinite(coefficients)):
+            raise RuntimeError("Primitive CSI tensor shape or value mismatch.")
+        return coefficients

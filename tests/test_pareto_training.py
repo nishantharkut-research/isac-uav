@@ -53,8 +53,15 @@ class TinyEnvironment:
             "communication_sum_rate": communication,
             "sensing_sum_rate": sensing,
             "joint_rate": communication + sensing,
+            "proposed_action": np.asarray(action, dtype=np.float32),
             "executed_action": executed,
             "physical_constraints_feasible": True,
+            "action_was_projected": self.step_index == 1,
+            "action_projection_fraction": 0.5 if self.step_index == 1 else 1.0,
+            "projection_source": (
+                "deterministic_recovery" if self.step_index == 1 else "actor_action"
+            ),
+            "allocation_fallback_used": self.step_index == 2,
             "rate_u": np.array([communication]),
             "rate_k": np.array([sensing]),
         }
@@ -158,19 +165,39 @@ class TrainerTests(unittest.TestCase):
                 torch.testing.assert_close(left, right, rtol=0.0, atol=0.0)
 
     def test_evaluator_returns_unsmoothed_raw_arrays(self):
+        result_agent = _agent()
         result = evaluate_preference_grid(
-            _agent(),
+            result_agent,
             environment_factory=lambda seed: TinyEnvironment(seed),
             scene_seeds=[101, 102],
             preferences=[[0.5, 0.5], [1.0, 0.0]],
+            evaluation_episodes=2,
         )
         self.assertEqual(result["scene_seeds"], [101, 102])
+        self.assertTrue(result["use_gate"])
+        self.assertEqual(result["gate_configuration"], {
+            "uncertainty_coefficient": float(
+                result_agent.uncertainty_coefficient
+            ),
+            "margin": float(result_agent.gate_margin),
+        })
         self.assertEqual(len(result["preferences"]), 2)
         balanced = result["preferences"][0]
         self.assertEqual(balanced["communication"], [2.5, 2.5])
         self.assertEqual(balanced["sensing"], [4.5, 4.5])
         self.assertEqual(balanced["minimum_ue_rate"], [2.0, 2.0])
         self.assertEqual(balanced["minimum_target_rate"], [4.0, 4.0])
+        self.assertEqual(balanced["action_projection_rate"], [0.5, 0.5])
+        self.assertEqual(balanced["mean_projection_fraction"], [0.75, 0.75])
+        self.assertEqual(balanced["deterministic_recovery_rate"], [0.5, 0.5])
+        self.assertEqual(balanced["allocation_fallback_rate"], [0.5, 0.5])
+        self.assertEqual(
+            [row["scene_seed"] for row in balanced["episode_evidence"]],
+            [101, 102],
+        )
+        self.assertEqual(
+            balanced["episode_evidence"][0]["communication"], [2.5, 2.5]
+        )
         self.assertNotIn("smoothed", balanced)
 
 
