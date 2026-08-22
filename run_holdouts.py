@@ -21,7 +21,7 @@ def build_parser():
     parser.add_argument("--seeds", required=True, help="Comma-separated, at least five")
     parser.add_argument("--episodes", type=int, default=1000)
     parser.add_argument("--eval-episodes", type=int, default=5)
-    parser.add_argument("--checkpoint-every", type=int, default=10)
+    parser.add_argument("--checkpoint-every", type=int, default=1)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return add_ambiguity_cli_arguments(parser)
@@ -212,7 +212,10 @@ def run(args):
     from parameter_profiles import activate_profile, load_calibrated_profile
     from run_extension import require_accepted_baseline
     from source_integrity import source_tree_digest
-    from validate_results import result_payload_digest
+    from validate_results import (
+        require_canonical_baseline_validation,
+        result_payload_digest,
+    )
 
     seeds = parse_seeds(args.seeds)
     if args.episodes != cfg.E_episodes or args.episodes != 1000:
@@ -223,9 +226,13 @@ def run(args):
     profile = load_calibrated_profile(args.profile)
     activate_profile(profile)
     apply_ambiguity_arguments(args, cfg)
-    baseline = _read_json(args.baseline_summary)
+    baseline_path = Path(args.baseline_summary).resolve()
+    baseline = _read_json(baseline_path)
     baseline_validation = _read_json(args.baseline_validation)
     require_accepted_baseline(baseline_validation, baseline)
+    require_canonical_baseline_validation(
+        baseline, baseline_validation, baseline_path.parent
+    )
     if baseline.get("training_seed_protocol") != TRAINING_SEED_PROTOCOL:
         raise ValueError("Baseline does not use the required training-seed protocol")
     if tuple(baseline.get("seeds", [])) != seeds:

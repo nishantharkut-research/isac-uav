@@ -39,9 +39,18 @@ from paper_contract import (
     cascade_penalty_16c,
 )
 from experiment_contract import FIGURE_CONTRACTS
-from experiment_protocol import TRAINING_SEED_PROTOCOL, derive_training_seed
+from experiment_protocol import (
+    REPLAY_ACTION_SEMANTICS,
+    TRAINING_SEED_PROTOCOL,
+    derive_training_seed,
+)
 from parameter_profiles import active_profile_metadata
-from ambiguity_hypotheses import ddpg_comparator_scee
+from ambiguity_hypotheses import (
+    csi_observes_instantaneous,
+    ddpg_comparator_scee,
+    get_channel_coherence_hypothesis,
+)
+from training_progress import PROGRESS_INTERVAL_EPISODES, progress_snapshot
 
 
 
@@ -165,6 +174,9 @@ def _configuration_fingerprint(payload=None):
         "los_probability_hypothesis_id": cfg.los_probability_hypothesis_id,
         "channel_coherence_hypothesis_id":
             cfg.channel_coherence_hypothesis_id,
+        "csi_observation_hypothesis_id":
+            cfg.csi_observation_hypothesis_id,
+        "rate_model_hypothesis_id": cfg.rate_model_hypothesis_id,
         "cross_function_interference_hypothesis_id":
             cfg.cross_function_interference_hypothesis_id,
         "sigma2_u": cfg.sigma2_u,
@@ -174,6 +186,19 @@ def _configuration_fingerprint(payload=None):
         "R_min": cfg.R_min, "Psi_max": cfg.Psi_max,
         "P_a_max": cfg.P_a_max,
         "partial_csi_fraction": cfg.partial_csi_fraction,
+        "T_steps": cfg.T_steps,
+        "B_batch": cfg.B_batch,
+        "lr_actor": cfg.lr_actor,
+        "lr_critic": cfg.lr_critic,
+        "gamma": cfg.gamma,
+        "tau": cfg.tau,
+        "replay_size": cfg.replay_size,
+        "noise_std": cfg.noise_std,
+        "noise_min": cfg.noise_min,
+        "noise_decay": cfg.noise_decay,
+        "upsilon_0": cfg.upsilon_0,
+        "upsilon_min": cfg.upsilon_min,
+        "upsilon_decay": cfg.upsilon_decay,
         "source_seed": cfg.source_scene_seed,
         "target_seed": cfg.target_scene_seed,
         "parameter_profile_digest": active_profile_metadata()["digest"],
@@ -190,6 +215,17 @@ def _training_checkpoint_path(tag):
         for character in str(tag)
     ).strip("_")
     return os.path.join(OUT, "checkpoints", f"{safe_tag}_latest.pt")
+
+
+def exploration_noise_for_episode(episode):
+    """Return the declared per-episode Gaussian exploration standard deviation."""
+    episode = int(episode)
+    if episode < 1:
+        raise ValueError("episode must be a positive one-based index")
+    return max(
+        float(cfg.noise_min),
+        float(cfg.noise_std) * float(cfg.noise_decay) ** (episode - 1),
+    )
 
 
 @contextmanager
@@ -240,6 +276,7 @@ def _training_identity(env, tag, algorithm, requested_episodes,
                 ) <= 0.0),
             ),
             "allocation_mode": env.allocation_mode,
+            "hris_partition_mode": cfg.hris_partition_mode,
         }),
         "parameter_profile_digest": active_profile_metadata()["digest"],
         "objective": env.objective_spec.as_dict(),
@@ -252,6 +289,7 @@ def _training_identity(env, tag, algorithm, requested_episodes,
         "environment_seed": getattr(env, "seed", None),
         "training_seed": None if training_seed is None else int(training_seed),
         "training_seed_protocol": TRAINING_SEED_PROTOCOL,
+        "replay_action_semantics": REPLAY_ACTION_SEMANTICS,
         "state_dim": int(env.state_dim),
         "action_dim": int(env.action_dim),
         "dtl_transfer_mode": (
@@ -267,6 +305,9 @@ def _training_identity(env, tag, algorithm, requested_episodes,
         "los_probability_hypothesis_id": cfg.los_probability_hypothesis_id,
         "channel_coherence_hypothesis_id":
             cfg.channel_coherence_hypothesis_id,
+        "csi_observation_hypothesis_id":
+            cfg.csi_observation_hypothesis_id,
+        "rate_model_hypothesis_id": cfg.rate_model_hypothesis_id,
         "cross_function_interference_hypothesis_id":
             cfg.cross_function_interference_hypothesis_id,
     }
@@ -314,13 +355,16 @@ def train_experiment_bundle(n_episodes,
         raise ValueError("Source and target tasks must use different scene seeds.")
 
     variant_settings = {
-        "perfect": (0.0, True, 1.0, True),
-        "imperfect": (cfg.rho_nmse, True, 1.0, False),
-        "partial": (cfg.rho_nmse, True, cfg.partial_csi_fraction, True),
+        "perfect": (0.0, True, 1.0, "perfect"),
+        "imperfect": (cfg.rho_nmse, True, 1.0, "imperfect"),
+        "partial": (cfg.rho_nmse, True, cfg.partial_csi_fraction, "partial"),
     }
     if variant_sigmas:
         variant_settings.update({
-            name: (float(sigma2), True, 1.0, float(sigma2) <= 0.0)
+            name: (
+                float(sigma2), True, 1.0,
+                "perfect" if float(sigma2) <= 0.0 else "imperfect",
+            )
             for name, sigma2 in variant_sigmas.items()
         })
     unknown = set(variants) - set(variant_settings)
@@ -349,6 +393,9 @@ def train_experiment_bundle(n_episodes,
                 use_capon=True,
                 sensing_rate_min=sensing_rate_min,
                 sensing_only_sinr_min=sensing_only_sinr_min,
+                observe_instantaneous_csi=csi_observes_instantaneous(
+                    cfg, "imperfect"
+                ),
             )
             source = train_ddpg(
                 source_env, int(n_episodes), f"Source-{fingerprint}",
@@ -369,6 +416,11 @@ def train_experiment_bundle(n_episodes,
                 use_capon=True,
                 sensing_rate_min=sensing_rate_min,
                 sensing_only_sinr_min=sensing_only_sinr_min,
+                observe_instantaneous_csi=csi_observes_instantaneous(
+                    cfg,
+                    "perfect" if ddpg_comparator_scee(cfg) <= 0.0
+                    else "imperfect",
+                ),
             )
             target_ddpg = train_ddpg(
                 target_env, int(n_episodes), f"Target-DDPG-{fingerprint}",
@@ -379,7 +431,7 @@ def train_experiment_bundle(n_episodes,
         dtl_runs = {}
         for name in variants:
             (sigma2, use_capon, observation_fraction,
-             observe_instantaneous_csi) = variant_settings[name]
+             csi_quality) = variant_settings[name]
             target_env = HRISUAVISACEnv(
                 sigma2_scee=sigma2,
                 seed=cfg.target_scene_seed,
@@ -387,7 +439,9 @@ def train_experiment_bundle(n_episodes,
                 sensing_rate_min=sensing_rate_min,
                 sensing_only_sinr_min=sensing_only_sinr_min,
                 csi_observation_fraction=observation_fraction,
-                observe_instantaneous_csi=observe_instantaneous_csi,
+                observe_instantaneous_csi=csi_observes_instantaneous(
+                    cfg, csi_quality
+                ),
             )
             dtl_runs[name] = train_dtl(
                 source["agent"], target_env, int(n_episodes),
@@ -405,6 +459,9 @@ def train_experiment_bundle(n_episodes,
                 sensing_beamformer_mode=cfg.wfb_beamformer_mode,
                 sensing_rate_min=sensing_rate_min,
                 sensing_only_sinr_min=sensing_only_sinr_min,
+                observe_instantaneous_csi=csi_observes_instantaneous(
+                    cfg, "perfect"
+                ),
             )
             dtl_runs["wfb"] = train_dtl(
                 source["agent"], wfb_env, int(n_episodes),
@@ -523,10 +580,10 @@ def _physical_baseline_rate(mode, sigma2=None, n_eval=5, seed_base=100,
             np.random.SeedSequence([episode_seed, 99])
         )
         step_rates = []
+        coherence = get_channel_coherence_hypothesis(
+            cfg.channel_coherence_hypothesis_id
+        )
         for slot_index in range(steps):
-            # Match the target-motion and channel-refresh order in env.step().
-            env._advance_targets()
-            env._refresh_channel(slot_time_s=(slot_index + 1) * cfg.delta_T)
             if mode == "random_phase":
                 theta, phi = _rand_phases(phase_rng)
                 label = "Random Phase"
@@ -544,6 +601,16 @@ def _physical_baseline_rate(mode, sigma2=None, n_eval=5, seed_base=100,
                 )
             ru, _, _, _ = compute_rates(env.ch, theta, phi, C, T)
             step_rates.append(float(np.sum(ru)))
+            if slot_index + 1 < steps:
+                env._advance_targets()
+                if coherence.resample_each_slot:
+                    env._episode_channel_seed = int(
+                        env._channel_rng.integers(0, 2**32 - 1)
+                    )
+                env._refresh_channel(
+                    env._episode_channel_seed,
+                    slot_time_s=(slot_index + 1) * cfg.delta_T,
+                )
         episode_rates.append(float(np.mean(step_rates)))
     return float(np.mean(episode_rates))
 
@@ -591,6 +658,13 @@ def _eval_agent_metrics(agent, sigma2, n_eval=5, seed_base=100,
                         strict_feasibility=True,
                         feasibility_evidence=None):
     """Return measured communication and sensing rates from agent rollouts."""
+    if observe_instantaneous_csi is None:
+        quality = (
+            "partial" if float(csi_observation_fraction) < 1.0
+            else "perfect" if float(sigma2 or 0.0) <= 0.0
+            else "imperfect"
+        )
+        observe_instantaneous_csi = csi_observes_instantaneous(cfg, quality)
     comm_rates = []
     sensing_rates = []
     for t in range(n_eval):
@@ -633,7 +707,7 @@ def _eval_agent_metrics(agent, sigma2, n_eval=5, seed_base=100,
 def _require_physical_feasibility(
         ch, theta, phi, C, T, beam_info, label, feasibility_evidence=None):
     _, cascade_ok, _ = cascade_penalty_16c(ch, theta, cfg.Psi_max)
-    p_ai = active_tx_power(ch, T, phi)
+    p_ai = active_tx_power(ch, C, T, phi)
     _, active_ok = active_power_penalty(p_ai, cfg.P_a_max)
     feasible = bool(
         beam_info.get("allocation_feasible", False)
@@ -705,6 +779,7 @@ def train_ddpg(env: HRISUAVISACEnv,
     t0 = time.time() - previous_elapsed
 
     for ep in range(start_episode, n_episodes + 1):
+        agent.noise_std = exploration_noise_for_episode(ep)
         state = env.reset()
         episode = {
             "reward": 0.0,
@@ -716,10 +791,9 @@ def train_ddpg(env: HRISUAVISACEnv,
         done = False
         while not done:
             action = agent.select_action(state, explore=True)
-            agent.noise_std = max(0.05, cfg.noise_std * (cfg.noise_decay ** ep))
             next_state, reward, done, info = env.step(action)
             agent.replay.push(
-                state, info["proposed_action"], reward, next_state, done
+                state, info["executed_action"], reward, next_state, done
             )
             agent.update()
             state = next_state
@@ -735,10 +809,13 @@ def train_ddpg(env: HRISUAVISACEnv,
         histories["joint_rates"].append(episode["joint"] / cfg.N_slots)
         histories["feasibility_rates"].append(episode["feasible"] / cfg.N_slots)
 
-        if ep % 50 == 0:
+        if ep % PROGRESS_INTERVAL_EPISODES == 0 or ep == n_episodes:
+            progress = progress_snapshot(ep, n_episodes, time.time() - t0)
             print(f"  Ep {ep:4d}/{n_episodes}  |  "
-                  f"avg_reward={np.mean(histories['rewards'][-50:]):.3f}  |  "
-                  f"elapsed={time.time()-t0:.0f}s", flush=True)
+                  f"avg_reward={np.mean(histories['rewards'][-PROGRESS_INTERVAL_EPISODES:]):.3f}  |  "
+                  f"elapsed={progress['elapsed_seconds'] / 3600.0:.2f}h  |  "
+                  f"eta={progress['eta_seconds'] / 3600.0:.2f}h",
+                  flush=True)
 
         if ep % checkpoint_every == 0 or ep == n_episodes:
             save_training_checkpoint(
@@ -748,6 +825,7 @@ def train_ddpg(env: HRISUAVISACEnv,
 
     return dict(agent=agent, **histories,
                 checkpoint_path=checkpoint_path,
+                checkpoint_identity=identity,
                 elapsed_seconds=time.time() - t0)
 
 
@@ -801,6 +879,7 @@ def train_dtl(source_agent: DDPGAgent,
     t0 = time.time() - previous_elapsed
 
     for ep in range(start_episode, n_episodes + 1):
+        agent.noise_std = exploration_noise_for_episode(ep)
         state = env.reset()
         episode = {
             "reward": 0.0,
@@ -812,10 +891,9 @@ def train_dtl(source_agent: DDPGAgent,
         done = False
         while not done:
             action = agent.select_action(state, explore=True)
-            agent.noise_std = max(0.05, cfg.noise_std * (cfg.noise_decay ** ep))
             next_state, reward, done, info = env.step(action)
             agent.replay.push(
-                state, info["proposed_action"], reward, next_state, done
+                state, info["executed_action"], reward, next_state, done
             )
             agent.update()
             state = next_state
@@ -832,11 +910,14 @@ def train_dtl(source_agent: DDPGAgent,
         histories["joint_rates"].append(episode["joint"] / cfg.N_slots)
         histories["feasibility_rates"].append(episode["feasible"] / cfg.N_slots)
 
-        if ep % 50 == 0:
+        if ep % PROGRESS_INTERVAL_EPISODES == 0 or ep == n_episodes:
+            progress = progress_snapshot(ep, n_episodes, time.time() - t0)
             print(f"  Ep {ep:4d}/{n_episodes}  |  "
-                  f"avg_reward={np.mean(histories['rewards'][-50:]):.3f}  |  "
+                  f"avg_reward={np.mean(histories['rewards'][-PROGRESS_INTERVAL_EPISODES:]):.3f}  |  "
                   f"upsilon={agent.upsilon:.3f}  |  "
-                  f"elapsed={time.time()-t0:.0f}s", flush=True)
+                  f"elapsed={progress['elapsed_seconds'] / 3600.0:.2f}h  |  "
+                  f"eta={progress['eta_seconds'] / 3600.0:.2f}h",
+                  flush=True)
 
         if ep % checkpoint_every == 0 or ep == n_episodes:
             save_training_checkpoint(
@@ -846,6 +927,7 @@ def train_dtl(source_agent: DDPGAgent,
 
     return dict(agent=agent, **histories,
                 checkpoint_path=checkpoint_path,
+                checkpoint_identity=identity,
                 elapsed_seconds=time.time() - t0)
 
 
@@ -963,7 +1045,7 @@ def fig5_ao_convergence(scene_seed=42, ao_seed=5_000):
             res = run_ao(
                 pos_uav, pos_ues, pos_tes,
                 sigma2=cfg.rho_nmse, n_iter=cfg.ao_max_iter,
-                fix_uav=False, stop_on_convergence=False,
+                fix_uav=True, stop_on_convergence=False,
                 seed=int(ao_seed),
             )
             feasibility.require(
@@ -998,11 +1080,16 @@ def fig5_ao_convergence(scene_seed=42, ao_seed=5_000):
             **feasibility.as_metadata(),
             "method": "SciPy numerical AO surrogate",
             "early_stopping": False,
-            "uav_fixed": False,
+            "uav_fixed": True,
             "trajectory_disclosure": (
-                "one-step numerical trajectory block, not the unavailable "
-                "author CVX trajectory solver"
+                "fixed geometry; the unavailable author full-trajectory SCA "
+                "is not approximated by treating AO iterations as time slots"
             ),
+            "terminal_iterate_reported": True,
+            "ao_tolerance": float(cfg.ao_tol),
+            "phase_solver_max_iterations": int(cfg.sca_max_iter),
+            "active_passive_split_assumption": "La=floor(L/2)",
+            "streams_per_user_and_target": 1,
         },
     )
     return {"x": list(range(1, cfg.ao_max_iter + 1)), "curves": curves}
@@ -1032,7 +1119,7 @@ def fig6_rate_vs_power(training_registry=None, n_ep=None, n_eval=4,
                     if use_ao:
                         res = run_ao(
                             pos_uav, pos_ues, pos_tes, sigma2=sigma2,
-                            n_iter=cfg.fig6_ao_iter, fix_uav=False, seed=seed,
+                            n_iter=cfg.fig6_ao_iter, fix_uav=True, seed=seed,
                         )
                         feasibility.require(
                             res["is_feasible"],
@@ -1455,22 +1542,44 @@ def fig10_uav_trajectory(agent=None):
 
 def fig11_beampattern():
     print("\n===  Fig. 11: Beampattern Gain  ===")
-    from channel_model import upa_steering
+    from channel_model import active_hris_steering
     from sinr_rate import capon_beamformer
 
-    pos_uav, _, pos_tes = _fresh_scene(11)
-    target_directions = []
-    for target in pos_tes:
-        direction = np.asarray(target) - pos_uav
-        direction /= np.linalg.norm(direction) + 1e-12
-        target_directions.append(direction)
-    steering = [
-        upa_steering(cfg.Lax, cfg.Lay, direction[0], direction[1])
-        for direction in target_directions
-    ]
-    a_tgt = steering[0]
-    R_y = cfg.rho_nmse * np.eye(cfg.La, dtype=complex)
-    for other in steering[1:]:
+    if cfg.La <= 0:
+        raise ValueError("Figure 11 requires at least one active HRIS element.")
+
+    channel_seed = 11
+    pos_uav, pos_ues, pos_tes = _fresh_scene(channel_seed)
+    channel = ChannelSet(
+        pos_uav, pos_ues, pos_tes, sigma2=cfg.rho_nmse,
+        seed=channel_seed,
+    )
+    incident_amplitude = np.linalg.norm(channel.G_bri_hat, axis=1)
+    estimated_signatures = []
+    error_loadings = []
+    mean_incident_power = float(np.mean(np.abs(channel.G_bri_hat) ** 2))
+    for target_index, estimated_outgoing in enumerate(channel.H_rt_hat):
+        _left, singular_values, right_h = np.linalg.svd(
+            estimated_outgoing, full_matrices=False
+        )
+        outgoing_signature = (
+            singular_values[0] * right_h.conj().T[:, 0]
+        )
+        estimated_signatures.append(
+            outgoing_signature * incident_amplitude
+        )
+        mean_outgoing_power = float(np.mean(np.abs(estimated_outgoing) ** 2))
+        error_loadings.append(
+            channel.sv_rti[target_index] * mean_incident_power
+            + channel.sv_bri * mean_outgoing_power
+            + channel.sv_rti[target_index] * channel.sv_bri
+        )
+    a_tgt = estimated_signatures[0]
+    diagonal_loading = max(
+        float(np.mean(error_loadings)) + float(cfg.sigma2_a), 1e-30
+    )
+    R_y = diagonal_loading * np.eye(cfg.La, dtype=complex)
+    for other in estimated_signatures[1:]:
         R_y += np.outer(other, other.conj())
     T_cap = capon_beamformer(R_y, a_tgt)
     T_cap /= np.linalg.norm(T_cap) + 1e-12
@@ -1482,7 +1591,7 @@ def fig11_beampattern():
     def beam_gain(phi_s, eta_s, T_w):
         pb1 = np.sin(phi_s) * np.cos(eta_s)
         pb2 = np.sin(phi_s) * np.sin(eta_s)
-        a   = upa_steering(cfg.Lax, cfg.Lay, pb1, pb2)
+        a   = active_hris_steering(pb1, pb2)
         return float(np.abs(T_w.conj() @ a)**2)
 
     # iCSI beampattern
@@ -1507,7 +1616,14 @@ def fig11_beampattern():
     print(f"  Saved -> {path}")
     _save_figure_data(
         11, np.degrees(phi_range), {"iCSI beampattern": gain_i},
-        metadata={"elevation_degrees": np.degrees(eta_range)},
+        metadata={
+            "elevation_degrees": np.degrees(eta_range),
+            "channel_seed": channel_seed,
+            "scee_nmse": float(cfg.rho_nmse),
+            "beampattern_model_id":
+                "estimated_two_hop_active_signature_mvdr_v1",
+            "hris_partition_mode": cfg.hris_partition_mode,
+        },
     )
     return {"azimuth_degrees": np.degrees(phi_range),
             "elevation_degrees": np.degrees(eta_range), "gain": gain_i}

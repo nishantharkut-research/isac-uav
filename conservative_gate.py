@@ -1,4 +1,8 @@
-"""Pure lower-confidence selector for baseline-anchored residual actions."""
+"""Pure conservative ensemble-score selector for residual actions.
+
+The mean-minus-k-times-ensemble-spread score is a deterministic heuristic. It
+is not presented as a calibrated statistical confidence bound.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ class GateDecision:
     scale: float
     selected_index: int
     baseline_value: float
-    selected_lcb: float
+    selected_conservative_score: float
     uncertainty: float
     fallback_reason: str | None
 
@@ -59,27 +63,27 @@ def select_residual_scale(
             scale=0.0,
             selected_index=baseline_index,
             baseline_value=baseline_value,
-            selected_lcb=baseline_value,
+            selected_conservative_score=baseline_value,
             uncertainty=float("inf"),
             fallback_reason="nonfinite_ensemble_values",
         )
 
     means = values.mean(axis=0)
     uncertainties = values.std(axis=0, ddof=0)
-    lower_bounds = means - coefficient * uncertainties
+    conservative_scores = means - coefficient * uncertainties
     baseline_value = float(means[baseline_index])
 
     candidate_indices = np.flatnonzero(scale_array > 0.0)
     best_candidate = int(
-        candidate_indices[np.argmax(lower_bounds[candidate_indices])]
+        candidate_indices[np.argmax(conservative_scores[candidate_indices])]
     )
-    selected_lcb = float(lower_bounds[best_candidate])
-    if selected_lcb <= baseline_value + gate_margin:
+    selected_score = float(conservative_scores[best_candidate])
+    if selected_score <= baseline_value + gate_margin:
         return GateDecision(
             scale=0.0,
             selected_index=baseline_index,
             baseline_value=baseline_value,
-            selected_lcb=selected_lcb,
+            selected_conservative_score=selected_score,
             uncertainty=float(uncertainties[best_candidate]),
             fallback_reason="insufficient_conservative_advantage",
         )
@@ -87,7 +91,7 @@ def select_residual_scale(
         scale=float(scale_array[best_candidate]),
         selected_index=best_candidate,
         baseline_value=baseline_value,
-        selected_lcb=selected_lcb,
+        selected_conservative_score=selected_score,
         uncertainty=float(uncertainties[best_candidate]),
         fallback_reason=None,
     )

@@ -42,6 +42,14 @@ class EnvironmentCheckpointValidationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "alpha"):
                     self.environment.restore_checkpoint_state(state)
 
+    def test_checkpoint_binds_sensing_only_sinr_floor(self):
+        environment = HRISUAVISACEnv(seed=2025, sensing_only_sinr_min=0.25)
+        state = environment.checkpoint_state()
+        self.assertEqual(state["sensing_only_sinr_min"], 0.25)
+        state["sensing_only_sinr_min"] = 0.5
+        with self.assertRaisesRegex(ValueError, "sensing-only SINR"):
+            environment.restore_checkpoint_state(state)
+
 
 if __name__ == "__main__":
     unittest.main()

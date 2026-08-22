@@ -1,6 +1,7 @@
 """Bounded calibration of omitted parameters against declared paper curves."""
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
@@ -8,11 +9,15 @@ from typing import Callable, Mapping, Sequence
 import numpy as np
 from scipy.optimize import minimize
 
-from ambiguity_hypotheses import PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID
+from ambiguity_hypotheses import (
+    PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+    PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
+)
 from paper_reference import load_paper_references
 from paper_contract import (
     CALIBRATION_SOLVER_SCOPE,
     FIGURE_6_SYSTEM_CONFIGURATION,
+    ao_surrogate_contract,
 )
 from parameter_evidence import (
     PARAMETER_EVIDENCE,
@@ -46,6 +51,14 @@ def _source_tree_sha256(value=None):
     ):
         raise ValueError("Calibration requires a valid source-tree SHA-256.")
     return value
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -296,6 +309,8 @@ def write_calibration_report(result: CalibrationResult, output_path,
                              "description_literal_target_matches_ue",
                              los_probability_hypothesis_id=
                              PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+                             rate_model_hypothesis_id=
+                             PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
                              cross_function_interference_hypothesis_id=
                              "paper_eq12_eq14_literal_cross_channels",
                              fixed_sensitivity_values=None,
@@ -313,17 +328,21 @@ def write_calibration_report(result: CalibrationResult, output_path,
         or any(character not in "0123456789abcdef" for character in paper_reference_sha256)
     ):
         raise ValueError("Calibration report requires a paper-reference SHA-256.")
+    from config import cfg
+
     source_tree_sha256 = _source_tree_sha256(source_tree_sha256)
     payload = {
         "schema_version": 1,
         "method": "bounded_scipy_powell",
         "calibration_solver_scope": CALIBRATION_SOLVER_SCOPE,
+        "ao_surrogate_contract": ao_surrogate_contract(cfg),
         "calibration_system": dict(FIGURE_6_SYSTEM_CONFIGURATION),
         "source_tree_digest": source_tree_sha256,
         "power_hypothesis_id": power_hypothesis_id,
         "calibration_noise_hypothesis_id":
             calibration_noise_hypothesis_id,
         "los_probability_hypothesis_id": los_probability_hypothesis_id,
+        "rate_model_hypothesis_id": rate_model_hypothesis_id,
         "cross_function_interference_hypothesis_id":
             cross_function_interference_hypothesis_id,
         "fixed_sensitivity_protocol": (
@@ -383,7 +402,9 @@ def make_ao_calibration_predictor(base_profile, seeds=(21_000, 21_001, 21_002),
                                   ao_iterations=6,
                                   power_hypothesis_id="paper_db_as_dbm",
                                   los_probability_hypothesis_id=
-                                  PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID):
+                                  PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+                                  rate_model_hypothesis_id=
+                                  PRIMARY_RATE_MODEL_HYPOTHESIS_ID):
     """Build a common-random-number AO predictor for Fig. 6 AO curves."""
     from ao_optimizer import run_ao
     from config import cfg, temporary_system_configuration
@@ -413,6 +434,7 @@ def make_ao_calibration_predictor(base_profile, seeds=(21_000, 21_001, 21_002),
                 applied_profile(profile), applied_ambiguity_hypotheses(
                     cfg,
                     los_probability_hypothesis_id=los_probability_hypothesis_id,
+                    rate_model_hypothesis_id=rate_model_hypothesis_id,
                 ):
             power_fields = (
                 "power_hypothesis_id", "PT_dB", "PT_reference",
@@ -437,7 +459,7 @@ def make_ao_calibration_predictor(base_profile, seeds=(21_000, 21_001, 21_002),
                             uav, users, targets = _scene(seed, cfg)
                             result = run_ao(
                                 uav, users, targets, sigma2=sigma2,
-                                n_iter=int(ao_iterations), fix_uav=False,
+                                n_iter=int(ao_iterations), fix_uav=True,
                                 stop_on_convergence=True, seed=seed,
                             )
                             if not result.get("is_feasible", False):
@@ -445,6 +467,21 @@ def make_ao_calibration_predictor(base_profile, seeds=(21_000, 21_001, 21_002),
                                     "infeasible AO calibration candidate for "
                                     f"{label}, P_T={power_db} dB, seed={seed}"
                                 )
+                            expected_ao = ao_surrogate_contract(cfg)
+                            observed_ao = {
+                                "solver_identity": result.get("solver_identity"),
+                                "trajectory_mode": result.get("trajectory_mode"),
+                                "reported_iterate": result.get("selection"),
+                                "beam_direction_method": result.get(
+                                    "beam_direction_method"
+                                ),
+                            }
+                            for field in observed_ao:
+                                if observed_ao[field] != expected_ao[field]:
+                                    raise RuntimeError(
+                                        "AO calibration result violates the locked "
+                                        f"surrogate contract: {field}"
+                                    )
                             values.append(float(result["sum_rate"]))
                         predictions["6"][label].append(float(np.mean(values)))
             finally:
@@ -463,6 +500,8 @@ def freeze_calibrated_profile(base_profile, result, output_path,
                               "description_literal_target_matches_ue",
                               los_probability_hypothesis_id=
                               PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
+                              rate_model_hypothesis_id=
+                              PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
                               cross_function_interference_hypothesis_id=
                               "paper_eq12_eq14_literal_cross_channels",
                               fixed_sensitivity_values=None,
@@ -501,6 +540,7 @@ def freeze_calibrated_profile(base_profile, result, output_path,
                 calibration_noise_hypothesis_id,
             "los_probability_hypothesis_id":
                 los_probability_hypothesis_id,
+            "rate_model_hypothesis_id": rate_model_hypothesis_id,
             "cross_function_interference_hypothesis_id":
                 cross_function_interference_hypothesis_id,
             "fixed_sensitivity_protocol": (
@@ -593,6 +633,12 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     reference_digest = paper_reference_digest(args.reference)
+    canonical_reference_digest = paper_reference_digest(None)
+    if reference_digest != canonical_reference_digest:
+        raise ValueError(
+            "Primary calibration requires the repository's canonical paper "
+            "reference payload."
+        )
     source_digest = _source_tree_sha256()
 
     prepared_base = load_prepared_profile(args.base_profile)
@@ -671,8 +717,12 @@ def main(argv=None):
         ))
         artifacts[hypothesis_id] = {
             "calibration_report": str(report_path.relative_to(output)),
+            "calibration_report_sha256": _file_sha256(report_path),
             "calibrated_profile": (
                 str(profile_path.relative_to(output)) if profile is not None else None
+            ),
+            "calibrated_profile_sha256": (
+                _file_sha256(profile_path) if profile is not None else None
             ),
         }
 
@@ -686,6 +736,20 @@ def main(argv=None):
     lock["calibration_solver_scope"] = CALIBRATION_SOLVER_SCOPE
     lock["calibration_system"] = dict(FIGURE_6_SYSTEM_CONFIGURATION)
     lock["source_tree_digest"] = source_digest
+    lock["source_profile_digest"] = base.digest
+    lock["fixed_sensitivity_values"] = fixed_sensitivity_values
+    lock["calibration_budgets"] = {
+        "ao_iterations": int(args.ao_iterations),
+        "optimizer_max_iterations": int(args.max_iterations),
+    }
+    lock["calibration_hypotheses"] = {
+        "calibration_noise_hypothesis_id":
+            "description_literal_target_matches_ue",
+        "los_probability_hypothesis_id": args.los_probability_hypothesis,
+        "rate_model_hypothesis_id": PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
+        "cross_function_interference_hypothesis_id":
+            "paper_eq12_eq14_literal_cross_channels",
+    }
     lock_path = write_selection_lock(output / "power_hypothesis_lock.json", lock)
     print(f"Power-hypothesis lock: {lock_path}")
     print(f"Selected calibrated profile: {output / selected_profile}")

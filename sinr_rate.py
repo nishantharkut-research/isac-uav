@@ -198,7 +198,7 @@ def select_feasible_beamformers(ch, theta: np.ndarray, phi: np.ndarray,
             "rate_u": rate_u,
             "rate_k": rate_k,
             "sensing_only_sinr": sensing_only_sinr(ch, phi, T),
-            "active_power": active_tx_power(ch, T, phi),
+            "active_power": active_tx_power(ch, C, T, phi),
         }
 
     constraints = AllocationConstraints(
@@ -473,10 +473,12 @@ def compute_rates(ch,
     cross_interference = get_cross_function_interference_hypothesis(
         cfg.cross_function_interference_hypothesis_id
     )
-    # Eqs. (21)/(25) must also be evaluated at zero estimation error. Switching
-    # to the scalar Eqs. (12)-(15) only at rho=0 creates a non-physical jump
-    # because N=2 and the two receiver models have different zero-error limits.
-    if use_scee_model:
+    # The paper does not reconcile scalar pCSI Eqs. (12)-(15) with matrix SCEE
+    # Eqs. (21)/(25) at zero NMSE. Keep that choice explicit and fingerprinted.
+    from ambiguity_hypotheses import use_matrix_scee_rate
+    if use_scee_model and use_matrix_scee_rate(
+        cfg, getattr(ch, "scee_nmse", 0.0)
+    ):
         return _compute_scee_rates(
             ch, theta, phi, C, T, H_bar_u, H_bar_k
         )
@@ -572,27 +574,30 @@ def sum_rate(ch, theta, phi, C, T) -> float:
 
 # ─── Active Element Transmit Power  (Eq. 18) ─────────────────────────────────
 
-def active_tx_power_components(ch, T: np.ndarray,
+def active_tx_power_components(ch, C: np.ndarray, T: np.ndarray,
                                phi: np.ndarray) -> np.ndarray:
-    """Return Eq. (18) signal powers for Eq. (16f)-normalized ``T``.
+    """Return Eq. (18) signal powers for the complete BS waveform.
 
-    The columns of ``T`` already carry square-root watts. Multiplying by
-    ``cfg.PT`` here would count the BS transmit power twice.
+    The columns of ``C`` and ``T`` already carry square-root watts under
+    Eq. (16f). Multiplying by ``cfg.PT`` here would count BS power twice.
     """
-    T_bar = T @ T.conj().T
+    transmit_covariance = C @ C.conj().T + T @ T.conj().T
     powers = np.zeros(cfg.La, dtype=float)
     for i in range(cfg.La):
         g_bri = ch.G_bri_hat[i, :]
-        gTg = float(np.real(g_bri @ T_bar @ g_bri.conj()))
-        powers[i] = abs(phi[i])**2 * max(gTg, 0.0)
+        incident_power = float(np.real(
+            g_bri @ transmit_covariance @ g_bri.conj()
+        ))
+        powers[i] = abs(phi[i])**2 * max(incident_power, 0.0)
     return powers
 
 
-def active_tx_power(ch, T: np.ndarray, phi: np.ndarray) -> float:
+def active_tx_power(ch, C: np.ndarray, T: np.ndarray,
+                    phi: np.ndarray) -> float:
     """Return aggregate P_ai with amplifier noise added once, per Eq. (18)."""
     if cfg.La == 0 or np.asarray(phi).size == 0:
         return 0.0
-    return float(np.sum(active_tx_power_components(ch, T, phi))
+    return float(np.sum(active_tx_power_components(ch, C, T, phi))
                  + cfg.sigma2_a)
 
 

@@ -12,12 +12,47 @@ import torch.optim as optim
 
 from config import cfg
 from conservative_gate import GateDecision, select_residual_scale
-from pareto_protocol import PNG_PREFERENCE, ParetoAnchors, validate_preferences
+from pareto_protocol import (
+    PNG_PREFERENCE,
+    ParetoAnchors,
+    discounted_return_scale,
+    validate_preferences,
+)
 from source_integrity import policy_model_digest
 from vector_replay import VectorReplayBuffer
 
 
 ALGORITHM_ID = "ba_pcdtl_v1"
+ACTOR_SCALARIZATION_ID = (
+    "state_horizon_rate_equivalent_dimensionless_exact_png_v2"
+)
+
+
+def remaining_discount_scale_from_state(
+    state: torch.Tensor,
+    *,
+    time_feature_index: int,
+    gamma: float,
+    horizon: int,
+) -> torch.Tensor:
+    """Return each transition's finite remaining-horizon discount sum."""
+    if state.ndim != 2:
+        raise ValueError("state must have shape (B, state_dim).")
+    index = int(time_feature_index)
+    horizon = int(horizon)
+    gamma = float(gamma)
+    if not 0 <= index < state.shape[1] or horizon <= 0 or not 0.0 <= gamma < 1.0:
+        raise ValueError("Invalid time feature, horizon, or discount factor.")
+    progress = torch.clamp(state[:, index], 0.0, 1.0)
+    elapsed = torch.round(progress * horizon)
+    remaining = torch.clamp(horizon - elapsed, min=1.0)
+    if gamma == 0.0:
+        return torch.ones_like(remaining)
+    gamma_tensor = torch.as_tensor(
+        gamma, dtype=state.dtype, device=state.device
+    )
+    scale = (1.0 - torch.pow(gamma_tensor, remaining)) / (1.0 - gamma)
+    return torch.where(remaining <= 1.0, torch.ones_like(scale), scale)
 
 
 class ConditionedResidualActor(nn.Module):
@@ -151,8 +186,9 @@ def scalarize_q_tensor(
     preferences: torch.Tensor,
     anchors: ParetoAnchors,
     augmentation: float = 0.05,
+    critic_return_scale: float = 1.0,
 ) -> torch.Tensor:
-    """Use physical joint sum for PNG rows and Chebyshev otherwise."""
+    """Return dimensionless utilities with the exact PNG joint-rate argmax."""
     if q_values.ndim != 2 or q_values.shape[-1] != 2:
         raise ValueError("q_values must have shape (B, 2).")
     if preferences.shape != q_values.shape:
@@ -169,21 +205,32 @@ def scalarize_q_tensor(
         ),
         dim=1,
     )
-    result = q_values.sum(dim=1)
-    if torch.all(balanced):
-        return result
     if not anchors.frozen:
-        raise RuntimeError("Non-PNG actor updates require frozen Pareto anchors.")
+        raise RuntimeError("Actor updates require frozen Pareto anchors.")
+    scale = torch.as_tensor(
+        critic_return_scale, dtype=q_values.dtype, device=q_values.device
+    )
+    if scale.ndim == 0:
+        scale = scale.repeat(q_values.shape[0])
+    if (
+        scale.shape != (q_values.shape[0],)
+        or not torch.all(torch.isfinite(scale))
+        or torch.any(scale <= 0.0)
+    ):
+        raise ValueError("critic_return_scale must be positive per sample.")
     ideal = torch.as_tensor(anchors.ideal, dtype=q_values.dtype, device=q_values.device)
     nadir = torch.as_tensor(anchors.nadir, dtype=q_values.dtype, device=q_values.device)
-    normalized = (q_values - nadir) / (ideal - nadir)
+    rate_equivalent = q_values / scale.unsqueeze(1)
+    normalized = (rate_equivalent - nadir) / (ideal - nadir)
     active = preferences > 0.0
     ratios = normalized / torch.clamp(preferences, min=1e-12)
     ratios = torch.where(active, ratios, torch.full_like(ratios, torch.inf))
     chebyshev = ratios.min(dim=1).values + float(augmentation) * (
         normalized * preferences
     ).sum(dim=1)
-    return torch.where(balanced, result, chebyshev)
+    joint_span = torch.sum(ideal - nadir)
+    png_utility = rate_equivalent.sum(dim=1) / joint_span
+    return torch.where(balanced, png_utility, chebyshev)
 
 
 class BAPCDTLAgent:
@@ -215,6 +262,8 @@ class BAPCDTLAgent:
         gate_margin: float = 0.0,
         transfer_trunks: bool = True,
         anchor_enabled: bool = True,
+        time_feature_index: int | None = None,
+        episode_horizon: int = cfg.N_slots,
     ) -> None:
         self.state_dim = int(state_dim)
         self.action_dim = int(action_dim)
@@ -232,6 +281,19 @@ class BAPCDTLAgent:
         self.ensemble_size = int(ensemble_size)
         self.batch_size = int(batch_size)
         self.gamma = float(gamma)
+        self.critic_return_scale = discounted_return_scale(
+            self.gamma, int(episode_horizon)
+        )
+        self.time_feature_index = (
+            None if time_feature_index is None else int(time_feature_index)
+        )
+        self.episode_horizon = int(episode_horizon)
+        if self.time_feature_index is not None and not (
+            0 <= self.time_feature_index < self.state_dim
+        ):
+            raise ValueError("time_feature_index is outside the policy state.")
+        if self.episode_horizon <= 0:
+            raise ValueError("episode_horizon must be positive.")
         self.tau = float(tau)
         self.exploration_std = float(exploration_std)
         self.target_noise_std = float(target_noise_std)
@@ -300,15 +362,34 @@ class BAPCDTLAgent:
         values = []
         repeated_state = state.repeat(actions.shape[0], 1)
         repeated_preference = preference.repeat(actions.shape[0], 1)
+        return_scale = self._rate_scale(repeated_state)
         with torch.no_grad():
             for twin in self.critic_ensembles:
                 q1, q2 = twin(repeated_state, repeated_preference, actions)
                 conservative = torch.minimum(q1, q2)
                 scalar = scalarize_q_tensor(
-                    conservative, repeated_preference, self.anchors
+                    conservative,
+                    repeated_preference,
+                    self.anchors,
+                    critic_return_scale=return_scale,
                 )
                 values.append(scalar.cpu().numpy())
         return np.stack(values, axis=0)
+
+    def _rate_scale(self, state: torch.Tensor) -> torch.Tensor:
+        if self.time_feature_index is None:
+            return torch.full(
+                (state.shape[0],),
+                self.critic_return_scale,
+                dtype=state.dtype,
+                device=state.device,
+            )
+        return remaining_discount_scale_from_state(
+            state,
+            time_feature_index=self.time_feature_index,
+            gamma=self.gamma,
+            horizon=self.episode_horizon,
+        )
 
     def select_action(
         self,
@@ -371,7 +452,8 @@ class BAPCDTLAgent:
                 "fallback_reason": decision.fallback_reason,
                 "gate_used": True,
                 "baseline_value": decision.baseline_value,
-                "selected_lcb": decision.selected_lcb,
+                "selected_conservative_score":
+                    decision.selected_conservative_score,
                 "uncertainty": decision.uncertainty,
             }
         result = np.clip(action.squeeze(0).cpu().numpy(), -1.0, 1.0)
@@ -436,7 +518,10 @@ class BAPCDTLAgent:
                 vector_values.append(torch.minimum(q1, q2))
             ensemble_value = torch.stack(vector_values, dim=0).mean(dim=0)
             actor_loss = -scalarize_q_tensor(
-                ensemble_value, preference, self.anchors
+                ensemble_value,
+                preference,
+                self.anchors,
+                critic_return_scale=self._rate_scale(state),
             ).mean()
             self.actor_optimizer.zero_grad()
             actor_loss.backward()
@@ -464,6 +549,11 @@ class BAPCDTLAgent:
             "ensemble_size": self.ensemble_size,
             "batch_size": self.batch_size,
             "gamma": self.gamma,
+            "critic_return_scale": self.critic_return_scale,
+            "critic_anchor_units": "state_remaining_horizon_return_to_rate",
+            "actor_scalarization_id": ACTOR_SCALARIZATION_ID,
+            "time_feature_index": self.time_feature_index,
+            "episode_horizon": self.episode_horizon,
             "tau": self.tau,
             "exploration_std": self.exploration_std,
             "target_noise_std": self.target_noise_std,

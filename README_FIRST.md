@@ -30,6 +30,9 @@ percentage is part of this literal objective. The older
 All training runners checkpoint complete mutable state and resume after an
 interruption when the identical command is rerun. Do not edit checkpoints,
 manifests, seed lists, gate locks, or result arrays.
+Completed-result validators inspect checkpoint internals and require identity,
+completion count, and raw histories to match the serialized evidence; matching
+outer hashes alone is insufficient.
 
 Every executed transition is checked for signal, power, HRIS, and UAV
 feasibility, including return reachability and exact final closure. Recovery is
@@ -38,10 +41,14 @@ scene. Source-tree hashes make older preparation, calibration, results, and
 checkpoints inadmissible after code changes, so this package requires a clean
 run from preparation onward.
 
-Before real baseline training, the runner automatically rejects a calibrated
-configuration that is infeasible or effectively insensitive to policy actions.
-Figure 6 calibration also fails closed on pCSI/iCSI inversion, flat power
+Before real baseline training, the runner records a deterministic feasibility
+and action-response diagnostic. Its weak-response findings are advisory and do
+not stop training. Figure 6 calibration separately fails closed on pCSI/iCSI inversion, flat power
 response, or a materially poor curve fit.
+
+Publication calibration, validation, and plotting accept only the repository's
+canonical `references/paper_reference_curves.json` content. A modified
+reference payload is rejected even when it satisfies the JSON schema.
 
 Static source verification does not train DRL models:
 

@@ -12,19 +12,96 @@ from typing import Mapping
 
 import numpy as np
 
+from ambiguity_hypotheses import AMBIGUITY_IDENTITY_REGISTRIES
+from checkpointing import (
+    inspect_training_checkpoint,
+    validate_checkpoint_authority,
+)
 from pareto_protocol import (
     ParetoAnchors,
     holm_adjust,
     hypervolume_2d,
+    normalized_physical_zero_reference,
     paired_confidence_interval,
     validate_preferences,
 )
-from run_pareto_extension import select_gate_configuration, validate_seed_roles
-from validate_results import result_payload_digest
+from experiment_protocol import (
+    PROJECTION_ATTRIBUTION_THRESHOLDS,
+    PROJECTION_EVIDENCE_KEYS,
+    REPLAY_ACTION_SEMANTICS,
+    derive_training_seed,
+    projection_attribution_passes,
+)
+from run_pareto_extension import (
+    _derive_research_seed,
+    _preference_suffix,
+    select_gate_configuration,
+    validate_seed_roles,
+)
+from validate_results import (
+    require_canonical_baseline_validation,
+    result_payload_digest,
+)
+from source_integrity import source_model_state_digest
 
 
 def _check(passed, **details) -> dict:
     return {"pass": bool(passed), **details}
+
+
+def _recompute_training_anchors(summary: Mapping) -> ParetoAnchors:
+    """Rebuild locked anchors solely from serialized scalar training tails."""
+    provenance = summary.get("anchors", {}).get("provenance", {})
+    required_methods = [
+        "same_objective_dtl",
+        "cross_objective_dtl_diagnostic",
+        "ddpg_scratch",
+    ]
+    if (
+        provenance.get("partition") != "training_only"
+        or provenance.get("estimator")
+        != "per-method converged-tail quantiles"
+        or provenance.get("source_methods") != required_methods
+        or provenance.get("research_seeds") != summary.get("research_seeds")
+    ):
+        raise ValueError("Pareto anchor provenance is incomplete or inconsistent.")
+    tail_fraction = float(provenance["tail_fraction"])
+    tail_minimum = int(provenance["tail_minimum_episodes"])
+    lower = float(provenance["lower_quantile"])
+    upper = float(provenance["upper_quantile"])
+    if not 0.0 < tail_fraction <= 1.0 or tail_minimum <= 0:
+        raise ValueError("Pareto anchor tail definition is invalid.")
+
+    recomputed = ParetoAnchors()
+    records = summary.get("research_seed_records", [])
+    if [record.get("seed") for record in records] != summary.get("research_seeds"):
+        raise ValueError("Pareto anchor seed records are incomplete or reordered.")
+    for record in records:
+        methods = record.get("training", {}).get("scalar", {}).get("methods", {})
+        for method in required_methods:
+            training = methods.get(method, {}).get("training", {})
+            communication = np.asarray(training.get("comm_rates"), dtype=np.float64)
+            sensing = np.asarray(training.get("sensing_rates"), dtype=np.float64)
+            if (
+                communication.ndim != 1
+                or sensing.shape != communication.shape
+                or communication.size != int(summary.get("episodes", -1))
+                or not np.all(np.isfinite(communication))
+                or not np.all(np.isfinite(sensing))
+            ):
+                raise ValueError(f"{method} anchor training history is invalid.")
+            values = np.column_stack([communication, sensing])
+            tail_count = min(
+                values.shape[0],
+                max(tail_minimum, int(np.ceil(tail_fraction * values.shape[0]))),
+            )
+            recomputed.update_training(
+                values[-tail_count:],
+                lower_quantile=lower,
+                upper_quantile=upper,
+            )
+    recomputed.freeze(provenance)
+    return recomputed
 
 
 def _sha256_file(path) -> str:
@@ -59,12 +136,18 @@ def _finite_array(record, key, expected_length) -> np.ndarray:
     return array
 
 
-def _validate_rate_record(record, expected_length) -> dict[str, np.ndarray]:
+def _validate_rate_record(
+        record, expected_length, *, require_policy_evidence=False,
+        scene_seeds=None, evaluation_episodes=None,
+) -> dict[str, np.ndarray]:
     keys = (
         "communication", "sensing", "joint", "objective", "minimum_ue_rate",
-        "minimum_target_rate", "feasibility",
+        "minimum_target_rate", "feasibility", *PROJECTION_EVIDENCE_KEYS,
     )
     arrays = {key: _finite_array(record, key, expected_length) for key in keys}
+    if require_policy_evidence:
+        for key in ("mean_residual_scale", "baseline_fallback_rate"):
+            arrays[key] = _finite_array(record, key, expected_length)
     if not np.allclose(
         arrays["joint"], arrays["communication"] + arrays["sensing"],
         rtol=0.0, atol=1e-8,
@@ -72,12 +155,76 @@ def _validate_rate_record(record, expected_length) -> dict[str, np.ndarray]:
         raise ValueError("Raw joint values do not equal communication plus sensing.")
     if not np.allclose(arrays["objective"], arrays["joint"], rtol=0.0, atol=1e-8):
         raise ValueError("PNG objective values do not equal the raw joint rate.")
+    for key in ("feasibility", *PROJECTION_EVIDENCE_KEYS):
+        if np.any(arrays[key] < 0.0) or np.any(arrays[key] > 1.0):
+            raise ValueError(f"{key} values must lie in [0, 1].")
+    if np.any(
+        arrays["deterministic_recovery_rate"]
+        > arrays["action_projection_rate"] + 1e-12
+    ):
+        raise ValueError(
+            "Deterministic-recovery rate cannot exceed action-projection rate."
+        )
+    if np.any(
+        1.0 - arrays["mean_projection_fraction"]
+        > arrays["action_projection_rate"] + 1e-12
+    ):
+        raise ValueError(
+            "Projection fraction is inconsistent with action-projection rate."
+        )
+    for key in ("mean_residual_scale", "baseline_fallback_rate"):
+        if key in arrays and (
+            np.any(arrays[key] < 0.0) or np.any(arrays[key] > 1.0)
+        ):
+            raise ValueError(f"{key} values must lie in [0, 1].")
+    if not projection_attribution_passes(record):
+        raise ValueError("Actor-action attribution thresholds are not met.")
+    if scene_seeds is not None or evaluation_episodes is not None:
+        if scene_seeds is None or evaluation_episodes is None:
+            raise ValueError("Episode evidence requires seeds and episode count.")
+        scene_seeds = [int(seed) for seed in scene_seeds]
+        evaluation_episodes = int(evaluation_episodes)
+        evidence = record.get("episode_evidence")
+        if (
+            evaluation_episodes <= 0
+            or not isinstance(evidence, list)
+            or len(evidence) != len(scene_seeds)
+        ):
+            raise ValueError("Per-episode evaluation evidence is incomplete.")
+        reconstructed = {key: [] for key in arrays}
+        for seed, episode in zip(scene_seeds, evidence):
+            if episode.get("scene_seed") != seed:
+                raise ValueError("Per-episode scene identity changed.")
+            episode_arrays = _validate_rate_record(
+                episode,
+                evaluation_episodes,
+                require_policy_evidence=require_policy_evidence,
+            )
+            for key in arrays:
+                reducer = (
+                    np.min
+                    if key in {"minimum_ue_rate", "minimum_target_rate"}
+                    else np.mean
+                )
+                reconstructed[key].append(float(reducer(episode_arrays[key])))
+        for key, expected in reconstructed.items():
+            if not np.allclose(
+                arrays[key], np.asarray(expected, dtype=np.float64),
+                rtol=0.0, atol=1e-10,
+            ):
+                raise ValueError(
+                    f"{key} does not reconstruct from per-episode evidence."
+                )
     return arrays
 
 
-def _grid_records(evaluation, preferences, scene_seeds) -> list[tuple[list, dict, dict]]:
+def _grid_records(
+        evaluation, preferences, scene_seeds, evaluation_episodes
+) -> list[tuple[list, dict, dict]]:
     if evaluation.get("scene_seeds") != list(scene_seeds):
         raise ValueError("Evaluation scene seeds do not match the locked test partition.")
+    if evaluation.get("evaluation_episodes") != int(evaluation_episodes):
+        raise ValueError("Evaluation episode count does not match the manifest.")
     rows = evaluation.get("preferences")
     if not isinstance(rows, list) or len(rows) != len(preferences):
         raise ValueError("Evaluation does not contain the complete preference grid.")
@@ -86,7 +233,17 @@ def _grid_records(evaluation, preferences, scene_seeds) -> list[tuple[list, dict
         actual = validate_preferences([row.get("preference")])[0].tolist()
         if not np.allclose(actual, expected, rtol=0.0, atol=1e-8):
             raise ValueError("Evaluation preference order or identity changed.")
-        result.append((expected, row, _validate_rate_record(row, len(scene_seeds))))
+        result.append((
+            expected,
+            row,
+            _validate_rate_record(
+                row,
+                len(scene_seeds),
+                require_policy_evidence=True,
+                scene_seeds=scene_seeds,
+                evaluation_episodes=evaluation_episodes,
+            ),
+        ))
     return result
 
 
@@ -151,10 +308,17 @@ def _validate_run_manifest_payload(summary, manifest) -> None:
         "test_scene_seeds",
         "episodes",
         "evaluation_episodes",
+        "ensemble_size",
+        "residual_radius",
+        "residual_scales",
         "preference_grid",
         "comparison_level",
+        "gate_selection_grid",
+        "hypervolume_reference_rule",
         "hypervolume_reference_normalized",
         "gate_selection_lock_sha256",
+        *AMBIGUITY_IDENTITY_REGISTRIES.keys(),
+        "ambiguity_contract",
     )
     mismatches = [
         field for field in shared_fields
@@ -168,16 +332,224 @@ def _validate_run_manifest_payload(summary, manifest) -> None:
         )
 
 
+def _verify_checkpoint_identity_envelope(
+        root: Path, record: Mapping, identity: Mapping
+) -> bool:
+    try:
+        checkpoint_relative = Path(str(record["checkpoint"]))
+        identity_relative = Path(str(record["checkpoint_identity"]))
+        expected_identity_relative = checkpoint_relative.with_suffix(
+            checkpoint_relative.suffix + ".identity.json"
+        )
+        checkpoints = (root / "checkpoints").resolve()
+        identity_path = (root / identity_relative).resolve()
+        if (
+            identity_relative != expected_identity_relative
+            or identity_path.parent != checkpoints
+            or not identity_path.is_file()
+            or not _is_sha256(record.get("checkpoint_identity_sha256"))
+            or _sha256_file(identity_path)
+            != record["checkpoint_identity_sha256"]
+        ):
+            return False
+        with identity_path.open("r", encoding="utf-8") as stream:
+            payload = json.load(stream)
+        return payload == {
+            "schema_version": 1,
+            "kind": "training_checkpoint_identity",
+            "checkpoint": record["checkpoint"],
+            "checkpoint_sha256": record["checkpoint_sha256"],
+            "identity": dict(identity),
+        }
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _verify_internal_checkpoint_authority(
+        root: Path, record: Mapping, identity: Mapping,
+) -> bool:
+    try:
+        checkpoint = (root / Path(str(record["checkpoint"]))).resolve()
+        validate_checkpoint_authority(
+            checkpoint,
+            identity,
+            record["training"],
+        )
+        return True
+    except Exception:
+        # Treat malformed or inconsistent torch payloads as invalid evidence.
+        return False
+
+
 def _verify_vector_checkpoint_identity(
-    root: Path, summary: Mapping, record: Mapping
+        root: Path, summary: Mapping, record: Mapping, *, seed: int,
+        method: str, fixed_preference=None,
 ) -> bool:
     identity = record.get("identity", {})
-    return (
+    if not isinstance(identity, Mapping):
+        return False
+    if method == "ba_pcdtl":
+        seed_role = method
+        residual_radius = summary.get("residual_radius")
+        transfer_trunks, anchor_enabled = True, True
+    elif method == "unanchored_vector_td3":
+        seed_role = method
+        residual_radius = 1.0
+        transfer_trunks, anchor_enabled = False, False
+    elif method == "anchored_random_trunks":
+        seed_role = method
+        residual_radius = summary.get("residual_radius")
+        transfer_trunks, anchor_enabled = False, True
+    elif fixed_preference is not None and method == (
+        f"independent_{_preference_suffix(fixed_preference)}"
+    ):
+        seed_role = "independent_weighted"
+        residual_radius = summary.get("residual_radius")
+        transfer_trunks, anchor_enabled = True, True
+    else:
+        return False
+    try:
+        expected = {
+            "run_id": f"{method}-seed-{int(seed)}",
+            "algorithm": summary["algorithm_id"],
+            "method": method,
+            "source_tree_digest": summary["source_tree_digest"],
+            "profile_digest": summary["profile_digest"],
+            "physical_configuration_fingerprint": summary[
+                "physical_configuration_fingerprint"
+            ],
+            "objective": summary["objective"],
+            "requested_episode_target": int(summary["episodes"]),
+            "environment_seed": int(record["environment_seed"]),
+            "training_seed": _derive_research_seed(seed, seed_role),
+            "baseline_policy_digest": record["baseline_policy_digest"],
+            "preference_grid": summary["preference_grid"],
+            "fixed_preference": fixed_preference,
+            "residual_radius": float(residual_radius),
+            "ensemble_size": summary["ensemble_size"],
+            "residual_scales": summary["residual_scales"],
+            "transfer_trunks": transfer_trunks,
+            "anchor_enabled": anchor_enabled,
+            "anchor_digest": ParetoAnchors.from_state_dict(
+                summary["anchors"]
+            ).digest(),
+            "replay_action_semantics": REPLAY_ACTION_SEMANTICS,
+            "training_seed_protocol": summary["training_seed_protocol"],
+            "power_hypothesis_id": summary["power_hypothesis_id"],
+            "baseline_payload_sha256": summary["baseline_payload_sha256"],
+            "baseline_validation_sha256": summary[
+                "baseline_validation_sha256"
+            ],
+            "ambiguity_contract": summary["ambiguity_contract"],
+            **{
+                field: summary[field]
+                for field in AMBIGUITY_IDENTITY_REGISTRIES
+            },
+        }
+    except (KeyError, TypeError, ValueError):
+        return False
+    return bool(
         _verify_checkpoint_record(root, record)
-        and identity.get("baseline_policy_digest")
-        == record.get("baseline_policy_digest")
-        and identity.get("source_tree_digest") == summary.get("source_tree_digest")
-        and identity.get("objective") == summary.get("objective")
+        and record.get("training_seed") == expected["training_seed"]
+        and _is_sha256(record.get("baseline_policy_digest"))
+        and dict(identity) == expected
+        and _verify_checkpoint_identity_envelope(root, record, identity)
+        and _verify_internal_checkpoint_authority(root, record, identity)
+    )
+
+
+def _verify_scalar_checkpoint_identity(
+        root: Path, summary: Mapping, record: Mapping, *, seed: int,
+        method: str,
+) -> bool:
+    identity = record.get("identity")
+    if not isinstance(identity, Mapping):
+        return False
+    specifications = {
+        "joint_source": (
+            f"joint-source-seed-{seed}", "DDPG", seed,
+            derive_training_seed(seed, "source"),
+        ),
+        "same_objective_dtl": (
+            f"same-objective-dtl-seed-{seed}", "DTL", seed + 100_000,
+            derive_training_seed(seed, "target"),
+        ),
+        "cross_objective_dtl_diagnostic": (
+            f"cross-objective-dtl-seed-{seed}", "DTL", seed + 100_000,
+            derive_training_seed(seed, "target"),
+        ),
+        "ddpg_scratch": (
+            f"joint-ddpg-scratch-seed-{seed}", "DDPG", seed + 100_000,
+            derive_training_seed(seed, "target"),
+        ),
+    }
+    if method not in specifications:
+        return False
+    run_id, algorithm, environment_seed, training_seed = specifications[method]
+    configuration_fingerprint = identity.get("configuration_fingerprint")
+    source_model_digest = identity.get("source_model_digest")
+    state_dim = identity.get("state_dim")
+    action_dim = identity.get("action_dim")
+    if (
+        not isinstance(configuration_fingerprint, str)
+        or len(configuration_fingerprint) != 20
+        or any(
+            character not in "0123456789abcdef"
+            for character in configuration_fingerprint
+        )
+        or isinstance(state_dim, bool)
+        or isinstance(action_dim, bool)
+        or not isinstance(state_dim, int)
+        or not isinstance(action_dim, int)
+        or state_dim <= 0
+        or action_dim <= 0
+        or (
+            algorithm == "DDPG"
+            and source_model_digest != "not_applicable"
+        )
+        or (
+            algorithm == "DTL"
+            and not _is_sha256(source_model_digest)
+        )
+    ):
+        return False
+    expected = {
+        "run_id": run_id,
+        "algorithm": algorithm,
+        "configuration_fingerprint": configuration_fingerprint,
+        "parameter_profile_digest": summary.get("profile_digest"),
+        "objective": summary.get("objective"),
+        "requested_episode_target": int(summary.get("episodes", -1)),
+        "power_hypothesis_id": summary.get("power_hypothesis_id"),
+        "source_tree_digest": summary.get("source_tree_digest"),
+        "source_model_digest": source_model_digest,
+        "environment_seed": environment_seed,
+        "training_seed": training_seed,
+        "training_seed_protocol": summary.get("training_seed_protocol"),
+        "replay_action_semantics": REPLAY_ACTION_SEMANTICS,
+        "state_dim": state_dim,
+        "action_dim": action_dim,
+        "dtl_transfer_mode": (
+            summary.get("dtl_transfer_mode")
+            if algorithm == "DTL" else "not_applicable"
+        ),
+        "dtl_transfer_schedule_id": (
+            summary.get("dtl_transfer_schedule_id")
+            if algorithm == "DTL" else "not_applicable"
+        ),
+        **{
+            field: summary.get(field)
+            for field in AMBIGUITY_IDENTITY_REGISTRIES
+            if field not in {
+                "dtl_transfer_mode", "dtl_transfer_schedule_id"
+            }
+        },
+    }
+    return bool(
+        _verify_checkpoint_record(root, record)
+        and dict(identity) == expected
+        and _verify_checkpoint_identity_envelope(root, record, identity)
+        and _verify_internal_checkpoint_authority(root, record, identity)
     )
 
 
@@ -190,6 +562,10 @@ def _validate_gate_evidence_payload(summary, payload) -> None:
         != summary.get("validation_scene_seeds")
         or payload.get("research_seeds") != summary.get("research_seeds")
         or payload.get("anchors_sha256") != summary.get("anchors_lock_sha256")
+        or payload.get("gate_selection_grid")
+        != summary.get("gate_selection_grid")
+        or payload.get("hypervolume_reference_normalized")
+        != summary.get("hypervolume_reference_normalized")
     ):
         raise ValueError("Gate-validation evidence authority fields mismatch.")
     anchors = ParetoAnchors.from_state_dict(summary["anchors"])
@@ -198,7 +574,30 @@ def _validate_gate_evidence_payload(summary, payload) -> None:
     validation_scenes = summary["validation_scene_seeds"]
     rows = payload.get("rows")
     candidates = summary.get("gate_selection", {}).get("candidates", [])
-    expected_count = len(summary["research_seeds"]) * len(candidates)
+    gate_grid = summary.get("gate_selection_grid", {})
+    coefficients = gate_grid.get("uncertainty_coefficients", [])
+    margins = gate_grid.get("margins", [])
+    expected_pairs = {
+        (float(coefficient), float(margin))
+        for coefficient in coefficients
+        for margin in margins
+    }
+    candidate_pairs = {
+        (
+            float(candidate["uncertainty_coefficient"]),
+            float(candidate["margin"]),
+        )
+        for candidate in candidates
+    }
+    if (
+        not coefficients
+        or not margins
+        or len(expected_pairs) != len(coefficients) * len(margins)
+        or candidate_pairs != expected_pairs
+        or len(candidates) != len(expected_pairs)
+    ):
+        raise ValueError("Locked gate candidates do not cover the preregistered grid.")
+    expected_count = len(summary["research_seeds"]) * len(expected_pairs)
     if not isinstance(rows, list) or len(rows) != expected_count:
         raise ValueError("Gate-validation raw row count is incomplete.")
     recomputed = {}
@@ -212,7 +611,23 @@ def _validate_gate_evidence_payload(summary, payload) -> None:
         if key in seen or key[0] not in summary["research_seeds"]:
             raise ValueError("Gate-validation row identity is duplicate or unknown.")
         seen.add(key)
-        grid = _grid_records(row["raw"], preferences, validation_scenes)
+        expected_gate_configuration = {
+            "uncertainty_coefficient": key[1],
+            "margin": key[2],
+        }
+        if (
+            row.get("raw", {}).get("use_gate") is not True
+            or row.get("raw", {}).get("gate_configuration")
+            != expected_gate_configuration
+        ):
+            raise ValueError(
+                "Gate-validation raw evaluation used a different gate "
+                "configuration."
+            )
+        grid = _grid_records(
+            row["raw"], preferences, validation_scenes,
+            summary["evaluation_episodes"],
+        )
         points = []
         feasibility = []
         fallback = []
@@ -291,6 +706,10 @@ def _validate_file_provenance(summary, root: Path) -> tuple[bool, str | None]:
     if (
         anchor_lock.get("schema_version") != 1
         or anchor_lock.get("anchors") != summary.get("anchors")
+        or anchor_lock.get("anchor_digest")
+        != ParetoAnchors.from_state_dict(summary["anchors"]).digest()
+        or anchor_lock.get("hypervolume_reference_rule")
+        != summary.get("hypervolume_reference_rule")
         or anchor_lock.get("normalized_hypervolume_reference")
         != summary.get("hypervolume_reference_normalized")
     ):
@@ -321,9 +740,38 @@ def _validate_file_provenance(summary, root: Path) -> tuple[bool, str | None]:
             "checkpoint_sha256": scalar_training.get(
                 "joint_source_checkpoint_sha256"
             ),
+            "checkpoint_identity": scalar_training.get(
+                "joint_source_checkpoint_identity"
+            ),
+            "checkpoint_identity_sha256": scalar_training.get(
+                "joint_source_checkpoint_identity_sha256"
+            ),
+            "identity": scalar_training.get("joint_source_identity"),
+            "training": scalar_training.get("joint_source_training"),
         }
-        if not _verify_checkpoint_record(root, source_record):
-            return False, "Joint-objective source checkpoint hash mismatch."
+        if not _verify_scalar_checkpoint_identity(
+            root,
+            summary,
+            source_record,
+            seed=int(seed_record["seed"]),
+            method="joint_source",
+        ):
+            return False, "Joint-objective source checkpoint identity mismatch."
+        try:
+            joint_source_digest = source_model_state_digest(
+                inspect_training_checkpoint(
+                    root / source_record["checkpoint"]
+                )["agent"]
+            )
+        except Exception:
+            return False, "Joint-objective source model payload mismatch."
+        baseline_authority = {
+            int(row["seed"]): row
+            for row in summary.get("baseline_checkpoint_authority", [])
+        }
+        paper_source_digest = baseline_authority.get(
+            int(seed_record["seed"]), {}
+        ).get("source_model_digest")
         scalar_order = (
             "same_objective_dtl",
             "cross_objective_dtl_diagnostic",
@@ -333,8 +781,29 @@ def _validate_file_provenance(summary, root: Path) -> tuple[bool, str | None]:
             return False, "Scalar comparator checkpoint set is incomplete."
         for method_name in scalar_order:
             method_record = scalar[method_name]
-            if not _verify_checkpoint_record(root, method_record):
-                return False, f"{method_name} checkpoint hash mismatch."
+            if not _verify_scalar_checkpoint_identity(
+                root,
+                summary,
+                method_record,
+                seed=int(seed_record["seed"]),
+                method=method_name,
+            ):
+                return False, f"{method_name} checkpoint identity mismatch."
+            expected_source_digest = (
+                joint_source_digest
+                if method_name == "same_objective_dtl"
+                else paper_source_digest
+                if method_name == "cross_objective_dtl_diagnostic"
+                else "not_applicable"
+            )
+            if method_record["identity"].get(
+                "source_model_digest"
+            ) != expected_source_digest:
+                return False, f"{method_name} source-model linkage mismatch."
+            if method_record["identity"]["action_dim"] != (
+                source_record["identity"]["action_dim"]
+            ):
+                return False, "Scalar source/target action dimensions mismatch."
             scalar_checkpoint_hashes.append(method_record["checkpoint_sha256"])
 
         expected_vector = {"ba_pcdtl"}
@@ -354,7 +823,11 @@ def _validate_file_provenance(summary, root: Path) -> tuple[bool, str | None]:
             if method_name not in vector:
                 continue
             if not _verify_vector_checkpoint_identity(
-                root, summary, vector[method_name]
+                root,
+                summary,
+                vector[method_name],
+                seed=int(seed_record["seed"]),
+                method=method_name,
             ):
                 return False, f"{method_name} checkpoint authority mismatch."
         if summary.get("comparison_level") == "full":
@@ -367,7 +840,12 @@ def _validate_file_provenance(summary, root: Path) -> tuple[bool, str | None]:
                     or policy.get("identity", {}).get("fixed_preference")
                     != preference
                     or not _verify_vector_checkpoint_identity(
-                        root, summary, policy
+                        root,
+                        summary,
+                        policy,
+                        seed=int(seed_record["seed"]),
+                        method=f"independent_{_preference_suffix(preference)}",
+                        fixed_preference=preference,
                     )
                 ):
                     return False, "Independent-policy checkpoint authority mismatch."
@@ -416,26 +894,56 @@ def validate_pareto_result(
         not _contains_forbidden_envelope(summary)
     )
 
-    if baseline is not None and baseline_validation is not None:
-        baseline_authority = (
-            baseline_validation.get("validation") == "paper_baseline"
-            and baseline_validation.get("overall_pass") is True
-            and baseline_validation.get("baseline_payload_sha256")
-            == result_payload_digest(baseline)
-            and summary.get("baseline_payload_sha256")
-            == result_payload_digest(baseline)
-            and summary.get("baseline_validation_sha256")
-            == result_payload_digest(baseline_validation)
-            and summary.get("profile_digest") == baseline.get("profile_digest")
-            and summary.get("physical_configuration_fingerprint")
-            == baseline.get("physical_configuration_fingerprint")
-            and summary.get("source_tree_digest") == baseline.get("source_tree_digest")
+    effective_training_seeds = None
+    if baseline is None or baseline_validation is None:
+        checks["accepted_baseline_authority"] = _check(
+            False, error="Accepted baseline summary and validation report are required."
         )
-        checks["accepted_baseline_authority"] = _check(baseline_authority)
-        checkpoint_authority_valid = False
+        checks["accepted_baseline_checkpoints"] = _check(
+            False, error="Accepted baseline checkpoint authority is unavailable."
+        )
+    else:
         try:
+            baseline_digest = result_payload_digest(baseline)
+            validation_digest = result_payload_digest(baseline_validation)
+            baseline_authority = (
+                baseline_validation.get("validation") == "paper_baseline"
+                and baseline_validation.get("overall_pass") is True
+                and baseline_validation.get("baseline_payload_sha256")
+                == baseline_digest
+                and summary.get("baseline_payload_sha256") == baseline_digest
+                and summary.get("baseline_validation_sha256") == validation_digest
+                and summary.get("profile_digest") == baseline.get("profile_digest")
+                and summary.get("physical_configuration_fingerprint")
+                == baseline.get("physical_configuration_fingerprint")
+                and summary.get("source_tree_digest")
+                == baseline.get("source_tree_digest")
+            )
+            checks["accepted_baseline_authority"] = _check(baseline_authority)
             authority = summary.get("baseline_checkpoint_authority", [])
             baseline_records = baseline.get("seed_records", [])
+            effective_training_seeds = set()
+            for record in baseline_records:
+                seed = int(record["seed"])
+                effective_training_seeds.update({
+                    int(record["source_seed"]),
+                    int(record["target_seed"]),
+                    int(record.get(
+                        "source_training_seed",
+                        derive_training_seed(seed, "source"),
+                    )),
+                    int(record.get(
+                        "target_training_seed",
+                        derive_training_seed(seed, "target"),
+                    )),
+                })
+                effective_training_seeds.update(
+                    _derive_research_seed(seed, role)
+                    for role in (
+                        "ba_pcdtl", "unanchored_vector_td3",
+                        "anchored_random_trunks", "independent_weighted",
+                    )
+                )
             checkpoint_authority_valid = (
                 [row.get("seed") for row in authority]
                 == summary.get("research_seeds")
@@ -460,6 +968,11 @@ def validate_pareto_result(
                     == baseline_row.get("methods", {}).get("DTL-pCSI", {}).get(
                         "checkpoint_sha256"
                     )
+                    and _is_sha256(authority_row.get("source_model_digest"))
+                    and authority_row.get("source_model_digest")
+                    == baseline_row.get("methods", {}).get(
+                        "DTL-pCSI", {}
+                    ).get("identity", {}).get("source_model_digest")
                 )
                 if baseline_directory is not None:
                     root = Path(baseline_directory).resolve()
@@ -478,6 +991,9 @@ def validate_pareto_result(
                 checkpoint_authority_valid
             )
         except (KeyError, OSError, TypeError, ValueError) as error:
+            checks["accepted_baseline_authority"] = _check(
+                False, error=str(error)
+            )
             checks["accepted_baseline_checkpoints"] = _check(
                 False, error=str(error)
             )
@@ -487,6 +1003,11 @@ def validate_pareto_result(
             summary.get("research_seeds", []),
             summary.get("validation_scene_seeds", []),
             summary.get("test_scene_seeds", []),
+            effective_training_seeds=(
+                None
+                if effective_training_seeds is None
+                else sorted(effective_training_seeds)
+            ),
         )
         seed_records = summary.get("research_seed_records", [])
         record_seeds = [int(row.get("seed")) for row in seed_records]
@@ -514,12 +1035,38 @@ def validate_pareto_result(
             anchors.frozen
             and anchors.provenance.get("partition") == "training_only"
         )
+        reference_rule = summary.get("hypervolume_reference_rule", {})
+        if (
+            reference_rule.get("physical_point_bits_per_second_per_hz")
+            != [0.0, 0.0]
+            or reference_rule.get("lock_partition")
+            != "training_only_before_validation"
+        ):
+            raise ValueError("Hypervolume reference rule is invalid.")
         reference = np.asarray(
             summary.get("hypervolume_reference_normalized"), dtype=np.float64
         )
         if reference.shape != (2,) or not np.all(np.isfinite(reference)):
             raise ValueError("Normalized hypervolume reference is invalid.")
-        checks["training_only_anchors"] = _check(anchors_valid)
+        expected_reference = normalized_physical_zero_reference(
+            anchors,
+            margin=reference_rule.get("normalized_margin"),
+        )
+        reference_valid = np.allclose(
+            reference, expected_reference, rtol=0.0, atol=1e-12
+        )
+        recomputed_anchors = _recompute_training_anchors(summary)
+        training_values_match = bool(
+            np.allclose(
+                recomputed_anchors.ideal, anchors.ideal, rtol=0.0, atol=1e-12
+            )
+            and np.allclose(
+                recomputed_anchors.nadir, anchors.nadir, rtol=0.0, atol=1e-12
+            )
+        )
+        checks["training_only_anchors"] = _check(
+            anchors_valid and reference_valid and training_values_match
+        )
     except (TypeError, ValueError) as error:
         anchors = None
         reference = None
@@ -532,13 +1079,42 @@ def validate_pareto_result(
         gate_selection_matches_rule = (
             select_gate_configuration(gate_candidates) == selected_gate
         )
-    except (TypeError, ValueError):
+        gate_grid = summary.get("gate_selection_grid", {})
+        coefficients = [
+            float(value) for value in gate_grid["uncertainty_coefficients"]
+        ]
+        margins = [float(value) for value in gate_grid["margins"]]
+        expected_gate_pairs = {
+            (coefficient, margin)
+            for coefficient in coefficients
+            for margin in margins
+        }
+        candidate_gate_pairs = {
+            (
+                float(candidate["uncertainty_coefficient"]),
+                float(candidate["margin"]),
+            )
+            for candidate in gate_candidates
+        }
+        gate_grid_valid = bool(
+            coefficients
+            and margins
+            and len(expected_gate_pairs) == len(coefficients) * len(margins)
+            and len(gate_candidates) == len(expected_gate_pairs)
+            and candidate_gate_pairs == expected_gate_pairs
+        )
+    except (KeyError, TypeError, ValueError):
         gate_selection_matches_rule = False
+        gate_grid_valid = False
     gate_valid = (
         gate_lock.get("selection_partition") == "validation_only"
         and gate_lock.get("validation_scene_seeds")
         == summary.get("validation_scene_seeds")
         and gate_lock.get("research_seeds") == summary.get("research_seeds")
+        and gate_lock.get("gate_selection_grid")
+        == summary.get("gate_selection_grid")
+        and gate_lock.get("hypervolume_reference_normalized")
+        == summary.get("hypervolume_reference_normalized")
         and _is_sha256(gate_lock.get("validation_evidence_sha256"))
         and gate_lock.get("validation_evidence_sha256")
         == summary.get("gate_validation_evidence_sha256")
@@ -548,6 +1124,7 @@ def validate_pareto_result(
         and len(gate_candidates) > 0
         and selected_gate in gate_candidates
         and gate_selection_matches_rule
+        and gate_grid_valid
     )
     checks["validation_locked_gate"] = _check(gate_valid)
 
@@ -577,6 +1154,7 @@ def validate_pareto_result(
         checks[name]["pass"]
         for name in (
             "generated_protocol", "exact_png_objective", "no_pointwise_envelope",
+            "accepted_baseline_authority", "accepted_baseline_checkpoints",
             "independent_seed_roles", "preference_grid", "training_only_anchors",
             "validation_locked_gate", "file_and_checkpoint_provenance",
         )
@@ -609,7 +1187,10 @@ def validate_pareto_result(
             for seed_record in seed_records:
                 tests = seed_record.get("test", {})
                 proposed_eval = tests["ba_pcdtl"]
-                rows = _grid_records(proposed_eval, preferences, scene_seeds)
+                rows = _grid_records(
+                    proposed_eval, preferences, scene_seeds,
+                    summary["evaluation_episodes"],
+                )
                 balanced_row, balanced_arrays = _balanced_record(rows)
                 gate_identity_valid = gate_identity_valid and (
                     proposed_eval.get("use_gate") is True
@@ -630,7 +1211,8 @@ def validate_pareto_result(
                     )
                 proposed_no_gate = tests["ba_pcdtl_no_gate"]
                 no_gate_rows = _grid_records(
-                    proposed_no_gate, preferences, scene_seeds
+                    proposed_no_gate, preferences, scene_seeds,
+                    summary["evaluation_episodes"],
                 )
                 ablation_grid_valid = ablation_grid_valid and (
                     proposed_no_gate.get("use_gate") is False
@@ -657,7 +1239,10 @@ def validate_pareto_result(
                             f"{comparator_name} test seeds changed."
                         )
                     scalar_arrays = _validate_rate_record(
-                        scalar, len(scene_seeds)
+                        scalar,
+                        len(scene_seeds),
+                        scene_seeds=scene_seeds,
+                        evaluation_episodes=summary["evaluation_episodes"],
                     )
                     scalar_arrays_by_name[comparator_name] = scalar_arrays
                     comparator_joint[comparator_name].append(
@@ -696,7 +1281,8 @@ def validate_pareto_result(
                     ):
                         ablation = tests[method_name]
                         ablation_rows = _grid_records(
-                            ablation, preferences, scene_seeds
+                            ablation, preferences, scene_seeds,
+                            summary["evaluation_episodes"],
                         )
                         ablation_grid_valid = ablation_grid_valid and (
                             ablation.get("use_gate") is False
@@ -727,7 +1313,8 @@ def validate_pareto_result(
                         continue
                     proposed_points = []
                     independent_points = []
-                    for (preference, _row, arrays), policy in zip(rows, policies):
+                    for (preference, _row, arrays), policy in zip(
+                            no_gate_rows, policies):
                         if not np.allclose(
                             policy.get("preference"), preference, rtol=0.0, atol=1e-8
                         ):
@@ -740,7 +1327,11 @@ def validate_pareto_result(
                             publication_grid_valid = False
                             continue
                         policy_arrays = _validate_rate_record(
-                            policy.get("evaluation", {}), len(scene_seeds)
+                            policy.get("evaluation", {}),
+                            len(scene_seeds),
+                            require_policy_evidence=True,
+                            scene_seeds=scene_seeds,
+                            evaluation_episodes=summary["evaluation_episodes"],
                         )
                         physical_valid = physical_valid and (
                             np.allclose(
@@ -778,6 +1369,9 @@ def validate_pareto_result(
             checks["raw_paired_evidence"] = _check(False, error=str(error))
 
     checks.setdefault("raw_paired_evidence", _check(raw_valid))
+    checks["actor_action_attribution"] = _check(
+        raw_valid, thresholds=PROJECTION_ATTRIBUTION_THRESHOLDS
+    )
     checks["physical_feasibility_and_rate_floors"] = _check(physical_valid)
     checks["locked_gate_identity"] = _check(gate_identity_valid)
     checks["complete_ungated_ablation_grid"] = _check(ablation_grid_valid)
@@ -883,14 +1477,22 @@ def main(argv=None) -> int:
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     summary_path = Path(args.summary).resolve()
+    baseline_path = Path(args.baseline_summary).resolve()
+    baseline = _read_json(baseline_path)
+    baseline_validation = _read_json(args.baseline_validation)
+    require_canonical_baseline_validation(
+        baseline,
+        baseline_validation,
+        baseline_path.parent,
+    )
     report = validate_pareto_result(
         _read_json(summary_path),
         level=args.level,
         result_directory=summary_path.parent,
         verify_files=True,
-        baseline=_read_json(args.baseline_summary),
-        baseline_validation=_read_json(args.baseline_validation),
-        baseline_directory=Path(args.baseline_summary).resolve().parent,
+        baseline=baseline,
+        baseline_validation=baseline_validation,
+        baseline_directory=baseline_path.parent,
     )
     from experiment_protocol import atomic_write_json
 

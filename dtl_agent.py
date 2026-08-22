@@ -8,9 +8,10 @@ Key idea (Eq. 30):
                + (1 − υ^t) · Q'(s^t, a^t | ς^{Q'}) ← target agent knowledge
 
 The paper does not specify how Eq. (30) enters a complete Bellman target or how
-the transfer rate changes over time. The evidence-ranked primary blends the
-current source Q-value with the ordinary target Bellman target. The earlier
-next-state continuation remains an explicit sensitivity branch.
+the transfer rate changes over time. The operational primary therefore keeps
+the full reward-bearing Eq. (26) target and blends source and target next-state
+continuation values. The literal non-Bellman reading and a current-Q/Bellman
+interpolation remain separately fingerprinted sensitivities.
 
 The target agent is initialized from the source weights. A constant transfer
 rate is primary; linear annealing is a separately fingerprinted sensitivity.
@@ -27,12 +28,15 @@ from ambiguity_hypotheses import (
 
 
 def build_eq30_critic_target(mode, upsilon, reward, done, gamma,
-                             source_current, source_next, target_next):
-    """Construct one of the two predeclared trainable readings of Eq. (30)."""
+                             source_current, target_current,
+                             source_next, target_next):
+    """Construct the literal Eq. (30) value or a declared integration."""
     get_transfer_update_hypothesis(mode)
     upsilon = float(upsilon)
     if not 0.0 <= upsilon <= 1.0:
         raise ValueError("upsilon must be in [0, 1]")
+    if mode == "eq30_literal_current_q_blend":
+        return upsilon * source_current + (1.0 - upsilon) * target_current
     if mode == "eq30_current_q_bellman_blend":
         bellman = reward + float(gamma) * target_next * (1.0 - done)
         blended = upsilon * source_current + (1.0 - upsilon) * bellman
@@ -87,9 +91,22 @@ class DTLAgent(DDPGAgent):
                  transfer_update_mode: str = None,
                  transfer_schedule: str = None):
 
+        source_state_dim = int(source_agent.state_dim)
+        source_action_dim = int(source_agent.action_dim)
+        if source_action_dim != int(action_dim):
+            raise ValueError(
+                "DTL source and target action dimensions require an explicit "
+                "semantic adapter; none is defined by the paper."
+            )
+        if source_state_dim > int(state_dim):
+            raise ValueError(
+                "DTL target state cannot omit source-state features without an "
+                "explicit semantic adapter."
+            )
         super().__init__(state_dim, action_dim)
 
         self.source  = source_agent          # frozen after pre-training
+        self._source_state_dim = source_state_dim
         self.upsilon = cfg.upsilon_0         # transfer weight  υ  (Eq. 30)
         self.transfer_update_mode = (
             cfg.dtl_transfer_mode
@@ -105,14 +122,15 @@ class DTLAgent(DDPGAgent):
             source_agent.actor.l1.in_features == state_dim
             and source_agent.actor.out.out_features == action_dim
         )
-        for param in self.source.actor.parameters():
-            param.requires_grad_(False)
-        for param in self.source.critic.parameters():
-            param.requires_grad_(False)
-        self.source.actor.eval()
-        self.source.critic.eval()
-        self.source.actor_tgt.eval()
-        self.source.critic_tgt.eval()
+        for network in (
+            self.source.actor,
+            self.source.critic,
+            self.source.actor_tgt,
+            self.source.critic_tgt,
+        ):
+            network.eval()
+            for param in network.parameters():
+                param.requires_grad_(False)
 
         # ── Warm-start target agent from source weights ───────────────────────
         # If dimensions match, copy directly; otherwise adapt (Sec. IV).
@@ -129,7 +147,8 @@ class DTLAgent(DDPGAgent):
 
         If dimensions are the same: direct copy (Sec. IV — "inherits weights
         from a well-trained model").
-        If different: copy shared layers and randomly initialise extra neurons.
+        If target state adds trailing CSI features: copy the full common-state
+        mapping and initialize only the added input columns to zero.
         """
         src_s_dim = source.actor.l1.in_features
         src_a_dim = source.actor.out.out_features
@@ -140,9 +159,15 @@ class DTLAgent(DDPGAgent):
             self._hard_copy(self.actor_tgt,  source.actor_tgt)
             self._hard_copy(self.critic_tgt, source.critic_tgt)
         else:
-            # Partial transfer: copy hidden layers, re-initialise I/O layers
+            # Statistical CSI is the exact prefix of the instantaneous state.
+            # Preserve the source mapping on that common subspace and let
+            # target fine-tuning learn the newly appended CSI features.
             self._partial_transfer(self.actor,  source.actor)
             self._partial_transfer(self.critic, source.critic)
+            self._copy_state_prefix(self.actor.l1, source.actor.l1)
+            self._copy_state_prefix(
+                self.critic.s_l1, source.critic.s_l1
+            )
             self._hard_copy(self.actor_tgt,  self.actor)
             self._hard_copy(self.critic_tgt, self.critic)
 
@@ -153,13 +178,44 @@ class DTLAgent(DDPGAgent):
             if tp.shape == sp.shape:
                 tp.data.copy_(sp.data)
 
+    @staticmethod
+    def _copy_state_prefix(tgt_layer: nn.Linear, src_layer: nn.Linear):
+        """Embed a source input layer in a larger prefix-compatible state."""
+        if (
+            tgt_layer.out_features != src_layer.out_features
+            or tgt_layer.in_features < src_layer.in_features
+        ):
+            raise ValueError("Incompatible state-prefix transfer layers.")
+        with torch.no_grad():
+            shared = src_layer.in_features
+            tgt_layer.weight[:, :shared].copy_(src_layer.weight)
+            tgt_layer.weight[:, shared:].zero_()
+            tgt_layer.bias.copy_(src_layer.bias)
+
+    def _source_state_view(self, state: torch.Tensor) -> torch.Tensor:
+        """Project an extended target state onto its declared source prefix."""
+        if state.shape[-1] != self.state_dim:
+            raise ValueError("Target-state tensor has the wrong feature dimension.")
+        return state[..., :self._source_state_dim]
+
+    def _source_q_values(self, state, action, next_state):
+        """Evaluate frozen source values on the shared state semantics."""
+        source_state = self._source_state_view(state)
+        source_next_state = self._source_state_view(next_state)
+        source_current = self.source.critic(source_state, action)
+        source_next_action = self.source.actor_tgt(source_next_state)
+        source_next = self.source.critic_tgt(
+            source_next_state, source_next_action
+        )
+        return source_current, source_next
+
     # ── DTL Update (Eq. 30) ───────────────────────────────────────────────────
 
     def update(self) -> dict:
         """
         One DTL gradient step.
 
-        Execute the configured, predeclared trainable interpretation of Eq. 30.
+        Execute the configured, predeclared interpretation of Eq. 30.
         """
         if len(self.replay) < cfg.B_batch:
             return {}
@@ -171,15 +227,8 @@ class DTLAgent(DDPGAgent):
             a_next   = self.actor_tgt(ns)
 
             q_target = self.critic_tgt(ns, a_next)
-            if self._source_dims_match:
-                q_source_current = self.source.critic(s, a)
-                q_source_next = self.source.critic_tgt(ns, a_next)
-            else:
-                # Cross-dimensional transfer is the warm-started shared
-                # weights. Evaluating source Q on incompatible vectors would
-                # require an adapter that the paper does not define.
-                q_source_current = r + self.gamma * q_target * (1.0 - done)
-                q_source_next = q_target
+            q_target_current = self.critic_tgt(s, a)
+            q_source_current, q_source_next = self._source_q_values(s, a, ns)
 
             y_t = build_eq30_critic_target(
                 self.transfer_update_mode,
@@ -188,6 +237,7 @@ class DTLAgent(DDPGAgent):
                 done,
                 self.gamma,
                 q_source_current,
+                q_target_current,
                 q_source_next,
                 q_target,
             )
@@ -234,6 +284,10 @@ class DTLAgent(DDPGAgent):
             "transfer_update_mode": self.transfer_update_mode,
             "transfer_schedule": self.transfer_schedule,
             "source_dims_match": bool(self._source_dims_match),
+            "source_state_projection": (
+                "identity" if self._source_dims_match else "common_prefix"
+            ),
+            "source_state_dim": int(self._source_state_dim),
             "source_agent": self.source.training_state_dict(),
         })
         return state
@@ -246,6 +300,13 @@ class DTLAgent(DDPGAgent):
             raise ValueError("DTL transfer-schedule hypothesis mismatch.")
         if bool(state["source_dims_match"]) != self._source_dims_match:
             raise ValueError("DTL source/target dimension relationship mismatch.")
+        expected_projection = (
+            "identity" if self._source_dims_match else "common_prefix"
+        )
+        if state.get("source_state_projection") != expected_projection:
+            raise ValueError("DTL source-state projection mismatch.")
+        if int(state.get("source_state_dim", -1)) != self._source_state_dim:
+            raise ValueError("DTL source-state dimension mismatch.")
         self.source.load_training_state_dict(state["source_agent"])
         self.upsilon = float(state["upsilon"])
         for network in (

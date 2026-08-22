@@ -4,6 +4,8 @@ import unittest
 from ambiguity_hypotheses import (
     DDPG_COMPARATOR_CSI_HYPOTHESES,
     CHANNEL_COHERENCE_HYPOTHESES,
+    CSI_OBSERVATION_HYPOTHESES,
+    RATE_MODEL_HYPOTHESES,
     CROSS_FUNCTION_INTERFERENCE_HYPOTHESES,
     LOS_PROBABILITY_HYPOTHESES,
     NOISE_HYPOTHESES,
@@ -11,9 +13,13 @@ from ambiguity_hypotheses import (
     TRANSFER_UPDATE_HYPOTHESES,
     WFB_HYPOTHESES,
     ambiguity_metadata,
+    apply_ambiguity_manifest_fields,
     apply_ambiguity_hypotheses,
     ddpg_comparator_scee,
+    csi_observes_instantaneous,
     get_noise_hypothesis,
+    use_matrix_scee_rate,
+    valid_ambiguity_manifest_fields,
 )
 from config import cfg
 from experiment_protocol import physical_configuration_fingerprint
@@ -21,6 +27,20 @@ from physical_hypotheses import dbm_to_watts
 
 
 class AmbiguityHypothesisTests(unittest.TestCase):
+    def test_operational_transfer_primary_keeps_reward_bearing_bellman_update(self):
+        primary = copy.copy(cfg)
+        apply_ambiguity_hypotheses(primary)
+        self.assertEqual(
+            primary.dtl_transfer_mode,
+            "eq30_next_state_continuation_blend",
+        )
+        self.assertEqual(
+            TRANSFER_UPDATE_HYPOTHESES[
+                "eq30_literal_current_q_blend"
+            ].role,
+            "sensitivity",
+        )
+
     def test_registry_contains_only_predeclared_hypotheses(self):
         self.assertEqual(
             set(NOISE_HYPOTHESES),
@@ -32,6 +52,7 @@ class AmbiguityHypothesisTests(unittest.TestCase):
         self.assertEqual(
             set(TRANSFER_UPDATE_HYPOTHESES),
             {
+                "eq30_literal_current_q_blend",
                 "eq30_current_q_bellman_blend",
                 "eq30_next_state_continuation_blend",
             },
@@ -53,11 +74,28 @@ class AmbiguityHypothesisTests(unittest.TestCase):
         )
         self.assertEqual(
             set(LOS_PROBABILITY_HYPOTHESES),
-            {"paper_eq6_literal_roles", "al_hourani_standard_mapped_roles"},
+            {
+                "paper_unnumbered_los_literal_roles",
+                "al_hourani_standard_mapped_roles",
+            },
         )
         self.assertEqual(
             set(CHANNEL_COHERENCE_HYPOTHESES),
             {"episode_block_fading", "independent_slot_fading"},
+        )
+        self.assertEqual(
+            set(CSI_OBSERVATION_HYPOTHESES),
+            {
+                "pcsi_instantaneous_icsi_statistical",
+                "instantaneous_estimates_all_csi_qualities",
+            },
+        )
+        self.assertEqual(
+            set(RATE_MODEL_HYPOTHESES),
+            {
+                "continuous_matrix_scee_all_csi_qualities",
+                "paper_split_scalar_pcsi_matrix_icsi",
+            },
         )
         self.assertEqual(
             set(CROSS_FUNCTION_INTERFERENCE_HYPOTHESES),
@@ -102,9 +140,58 @@ class AmbiguityHypothesisTests(unittest.TestCase):
             {
                 "noise", "transfer_update", "transfer_schedule", "wfb",
                 "ddpg_comparator_csi", "los_probability",
-                "channel_coherence",
+                "channel_coherence", "csi_observation", "rate_model",
                 "cross_function_interference",
             },
+        )
+
+    def test_nested_ambiguity_contract_must_match_authoritative_ids(self):
+        payload = apply_ambiguity_manifest_fields({}, cfg)
+        self.assertTrue(valid_ambiguity_manifest_fields(payload))
+        payload["ambiguity_contract"]["axes"]["rate_model"]["identifier"] = (
+            "paper_split_scalar_pcsi_matrix_icsi"
+        )
+        self.assertFalse(valid_ambiguity_manifest_fields(payload))
+
+    def test_zero_error_rate_model_is_explicit_and_fingerprinted(self):
+        primary = copy.copy(cfg)
+        apply_ambiguity_hypotheses(primary)
+        self.assertTrue(use_matrix_scee_rate(primary, 0.0))
+        self.assertTrue(use_matrix_scee_rate(primary, 1e-12))
+
+        sensitivity = copy.copy(cfg)
+        apply_ambiguity_hypotheses(
+            sensitivity,
+            rate_model_hypothesis_id="paper_split_scalar_pcsi_matrix_icsi",
+        )
+        self.assertFalse(use_matrix_scee_rate(sensitivity, 0.0))
+        self.assertTrue(use_matrix_scee_rate(sensitivity, 1e-12))
+        self.assertNotEqual(
+            physical_configuration_fingerprint("profile", primary),
+            physical_configuration_fingerprint("profile", sensitivity),
+        )
+
+    def test_csi_quality_and_state_observation_are_separate_axes(self):
+        primary = copy.copy(cfg)
+        apply_ambiguity_hypotheses(primary)
+        self.assertTrue(csi_observes_instantaneous(primary, "perfect"))
+        self.assertTrue(csi_observes_instantaneous(primary, "imperfect"))
+        self.assertTrue(csi_observes_instantaneous(primary, "partial"))
+
+        sensitivity = copy.copy(cfg)
+        apply_ambiguity_hypotheses(
+            sensitivity,
+            csi_observation_hypothesis_id=
+                "pcsi_instantaneous_icsi_statistical",
+        )
+        self.assertTrue(csi_observes_instantaneous(sensitivity, "perfect"))
+        self.assertFalse(csi_observes_instantaneous(sensitivity, "imperfect"))
+        self.assertTrue(csi_observes_instantaneous(sensitivity, "partial"))
+        with self.assertRaisesRegex(ValueError, "CSI quality"):
+            csi_observes_instantaneous(sensitivity, "best_curve")
+        self.assertNotEqual(
+            physical_configuration_fingerprint("profile", primary),
+            physical_configuration_fingerprint("profile", sensitivity),
         )
 
     def test_ddpg_comparator_primary_is_fair_pcsi_and_icsi_is_sensitivity(self):

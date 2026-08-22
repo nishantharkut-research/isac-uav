@@ -6,14 +6,36 @@ from pathlib import Path
 
 from config import cfg
 from experiment_protocol import (
+    EVALUATION_SEED_PROTOCOL,
+    derive_evaluation_scene_seed,
+    evaluation_scene_seed_grid,
     final_window_mean,
     physical_configuration_fingerprint,
     resolve_required_checkpoint,
+    step_projection_evidence,
     write_immutable_json,
 )
 
 
 class ExperimentProtocolTests(unittest.TestCase):
+    def test_evaluation_scene_grid_is_global_unique_and_reproducible(self):
+        research_seeds = tuple(range(2025, 2035))
+        first = evaluation_scene_seed_grid(research_seeds, 5)
+        second = evaluation_scene_seed_grid(research_seeds, 5)
+        flattened = [seed for row in first.values() for seed in row]
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(flattened), 50)
+        self.assertEqual(len(set(flattened)), 50)
+        self.assertEqual(
+            first[2025][0], derive_evaluation_scene_seed(2025, 0)
+        )
+        self.assertTrue(EVALUATION_SEED_PROTOCOL.startswith("sha256_"))
+        forbidden = set(research_seeds) | {
+            seed + 100_000 for seed in research_seeds
+        }
+        self.assertFalse(set(flattened) & forbidden)
+
     def test_final_window_mean_uses_only_declared_training_tail(self):
         values = [1.0, 2.0, 3.0, 4.0]
         self.assertEqual(final_window_mean(values, window=2), 3.5)
@@ -42,6 +64,8 @@ class ExperimentProtocolTests(unittest.TestCase):
             ("d_spacing", cfg.d_spacing * 0.8),
             ("z_UAV", cfg.z_UAV + 1.0),
             ("alpha_max", cfg.alpha_max * 0.9),
+            ("uav_start_x", cfg.uav_start_x + 1.0),
+            ("transition_timing_id", "different_transition"),
         ):
             with self.subTest(field=field):
                 changed = copy.copy(cfg)
@@ -100,6 +124,19 @@ class ExperimentProtocolTests(unittest.TestCase):
             write_immutable_json(path, copy.deepcopy(payload))
             with self.assertRaisesRegex(ValueError, "Immutable JSON"):
                 write_immutable_json(path, {**payload, "value": [3, 2, 1]})
+
+    def test_projection_evidence_rejects_string_boolean_flags(self):
+        valid = {
+            "action_was_projected": False,
+            "action_projection_fraction": 1.0,
+            "projection_source": "actor_action",
+            "allocation_fallback_used": False,
+        }
+        for field in ("action_was_projected", "allocation_fallback_used"):
+            with self.subTest(field=field):
+                malformed = {**valid, field: "False"}
+                with self.assertRaisesRegex(ValueError, "Boolean"):
+                    step_projection_evidence(malformed)
 
 
 if __name__ == "__main__":

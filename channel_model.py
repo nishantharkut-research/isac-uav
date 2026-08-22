@@ -50,10 +50,86 @@ def ula_steering(M: int, phi_rad: float) -> np.ndarray:
     return np.exp(1j * 2 * np.pi * np.arange(M) * cfg.d_spacing * np.sin(phi_rad))
 
 
+def hris_partition_indices(total: int, active: int):
+    """Return disjoint active/passive indices on one physical HRIS UPA."""
+    total = int(total)
+    active = int(active)
+    if total <= 0 or active < 0 or active > total:
+        raise ValueError("HRIS partition requires 0 <= active <= total.")
+    if cfg.hris_partition_mode == "paper_rectangular_subarrays_v1":
+        active_indices = np.arange(active, dtype=int)
+    elif cfg.hris_partition_mode == "uniformly_interleaved_full_upa_v1":
+        if active == 0:
+            active_indices = np.empty(0, dtype=int)
+        else:
+            active_indices = np.floor(
+                (np.arange(active, dtype=float) + 0.5) * total / active
+            ).astype(int)
+    else:
+        raise ValueError(f"Unknown HRIS partition mode: {cfg.hris_partition_mode}")
+    if np.unique(active_indices).size != active:
+        raise AssertionError("Interleaved HRIS partition produced duplicate indices.")
+    mask = np.ones(total, dtype=bool)
+    mask[active_indices] = False
+    return active_indices, np.flatnonzero(mask)
+
+
+def hris_element_coordinates() -> np.ndarray:
+    """Return physical element coordinates in the partition-index order."""
+    if cfg.hris_partition_mode == "uniformly_interleaved_full_upa_v1":
+        if cfg.Lx * cfg.Ly != cfg.L:
+            raise ValueError("Interleaved HRIS UPA dimensions do not match L.")
+        return np.array(
+            [(x, y) for x in range(cfg.Lx) for y in range(cfg.Ly)],
+            dtype=float,
+        )
+    if cfg.hris_partition_mode != "paper_rectangular_subarrays_v1":
+        raise ValueError(f"Unknown HRIS partition mode: {cfg.hris_partition_mode}")
+    if (
+        (cfg.La and cfg.La != cfg.Lax * cfg.Lay)
+        or (cfg.Lp and cfg.Lp != cfg.Lpx * cfg.Lpy)
+    ):
+        raise ValueError("HRIS subarray dimensions do not match La/Lp.")
+    active = np.array(
+        [(x, y) for x in range(cfg.Lax) for y in range(cfg.Lay)],
+        dtype=float,
+    ) if cfg.La else np.empty((0, 2), dtype=float)
+    passive_x_offset = cfg.Lax if cfg.La else 0
+    passive = np.array(
+        [
+            (passive_x_offset + x, y)
+            for x in range(cfg.Lpx)
+            for y in range(cfg.Lpy)
+        ],
+        dtype=float,
+    ) if cfg.Lp else np.empty((0, 2), dtype=float)
+    coordinates = np.concatenate([active, passive], axis=0)
+    if coordinates.shape != (cfg.L, 2):
+        raise ValueError("Physical HRIS coordinates do not match L.")
+    return coordinates
+
+
+def active_hris_steering(phi_bar1: float, phi_bar2: float) -> np.ndarray:
+    """Steering response at active elements on the one full HRIS aperture."""
+    if cfg.hris_partition_mode == "paper_rectangular_subarrays_v1":
+        if cfg.La and cfg.La != cfg.Lax * cfg.Lay:
+            raise ValueError("Active HRIS dimensions do not match La.")
+        return upa_steering(
+            cfg.Lax, cfg.Lay, float(phi_bar1), float(phi_bar2)
+        ) if cfg.La else np.empty(0, dtype=complex)
+    if cfg.Lx * cfg.Ly != cfg.L:
+        raise ValueError("Full HRIS UPA dimensions do not match L.")
+    active_indices, _passive_indices = hris_partition_indices(cfg.L, cfg.La)
+    full_response = upa_steering(
+        cfg.Lx, cfg.Ly, float(phi_bar1), float(phi_bar2)
+    )
+    return full_response[active_indices]
+
+
 # ─── Path Loss / LoS ─────────────────────────────────────────────────────────
 
 def plos(elev_deg: float) -> float:
-    """Return LoS probability under the locked Eq. (6) interpretation.
+    """Return LoS probability under the locked printed-form interpretation.
 
     The paper prints ``1/(1+b*exp(-a*(phi-b)))`` but does not tabulate
     ``a`` or ``b``. The common urban model prints the same functional form
@@ -66,7 +142,7 @@ def plos(elev_deg: float) -> float:
     hypothesis = get_los_probability_hypothesis(
         cfg.los_probability_hypothesis_id
     )
-    if hypothesis.identifier == "paper_eq6_literal_roles":
+    if hypothesis.identifier == "paper_unnumbered_los_literal_roles":
         return 1.0 / (1.0 + b * np.exp(-a * (elev_deg - b)))
     if hypothesis.identifier == "al_hourani_standard_mapped_roles":
         return 1.0 / (1.0 + a * np.exp(-b * (elev_deg - a)))
@@ -132,7 +208,7 @@ def target_doppler_frequency(pos_uav: np.ndarray,
 
 def gen_bs_hris(pos_uav: np.ndarray,
                 n_elem: int, Lx: int, Ly: int,
-                rng=None) -> np.ndarray:
+                rng=None, *, element_coordinates=None) -> np.ndarray:
     """
     BS → HRIS channel  G_br ∈ ℂ^{n_elem × M}  (Eq. 7).
 
@@ -152,7 +228,16 @@ def gen_bs_hris(pos_uav: np.ndarray,
     # HRIS receive UPA response  a_R ∈ ℂ^{n_elem}
     p_norm   = pos_uav / (np.linalg.norm(pos_uav) + 1e-9)
     phi_bar1, phi_bar2 = p_norm[0], p_norm[1]
-    a_R      = upa_steering(Lx, Ly, phi_bar1, phi_bar2)   # (n_elem,)
+    if element_coordinates is None:
+        a_R = upa_steering(Lx, Ly, phi_bar1, phi_bar2)
+    else:
+        coordinates = np.asarray(element_coordinates, dtype=float)
+        if coordinates.shape != (n_elem, 2):
+            raise ValueError("element_coordinates must have shape (n_elem, 2).")
+        a_R = np.exp(
+            -1j * 2 * np.pi * cfg.d_spacing
+            * (coordinates[:, 0] * phi_bar1 + coordinates[:, 1] * phi_bar2)
+        )
 
     # BS ULA transmit response  a_{b,h} ∈ ℂ^M
     phi_bs   = np.arctan2(pos_uav[1] - cfg.BS_pos[1],
@@ -172,6 +257,7 @@ def gen_hris_ground(pos_uav: np.ndarray,
                     n_elem: int,
                     rng=None,
                     *,
+                    element_coordinates=None,
                     target_velocity=None,
                     time_s: float = 0.0) -> np.ndarray:
     """
@@ -200,9 +286,21 @@ def gen_hris_ground(pos_uav: np.ndarray,
     # origin-to-UAV direction that was here before (which was identical for all users).
     dir_to_gnd = np.array(pos_gnd, dtype=float) - np.array(pos_uav, dtype=float)
     dir_norm   = dir_to_gnd / (np.linalg.norm(dir_to_gnd) + 1e-9)
-    from config import _factor_upa
-    Lx_h, Ly_h = _factor_upa(n_elem)
-    a_R_gnd = upa_steering(Lx_h, Ly_h, dir_norm[0], dir_norm[1])  # (n_elem,)
+    if element_coordinates is None:
+        from config import _factor_upa
+        Lx_h, Ly_h = _factor_upa(n_elem)
+        a_R_gnd = upa_steering(
+            Lx_h, Ly_h, dir_norm[0], dir_norm[1]
+        )
+    else:
+        coordinates = np.asarray(element_coordinates, dtype=float)
+        if coordinates.shape != (n_elem, 2):
+            raise ValueError("element_coordinates must have shape (n_elem, 2).")
+        a_R_gnd = np.exp(
+            -1j * 2 * np.pi * cfg.d_spacing
+            * (coordinates[:, 0] * dir_norm[0]
+               + coordinates[:, 1] * dir_norm[1])
+        )
 
     H_LoS  = np.outer(a_T, a_R_gnd.conj())              # (N, n_elem)
     H_NLoS = _complex_normal(rng, (N, n_elem))
@@ -239,27 +337,22 @@ def gen_direct(pos_tx: np.ndarray,
 
 # ─── SCEE Perturbation ────────────────────────────────────────────────────────
 
-def add_scee(H_true: np.ndarray, rho_nmse: float, rng=None) -> np.ndarray:
+def add_scee(H_hat: np.ndarray, rho_nmse: float, rng=None) -> np.ndarray:
     """
     Gaussian-Kronecker SCEE model (Sec. II-B):
         H = Ĥ + ΔH,   ΔH ~ CN(0, σ²_eff · I)
 
-    The paper defines ρ = E|H-H_hat|² / E|H_hat|². Given a sampled true H,
-    this function draws from the conditional Gaussian H_hat | H implied by
-    independent H_hat and estimation error. Thus the unconditional error
-    variance is ρ/(1+ρ) times true-channel power; ρ is never treated as watts.
+    The argument is the estimated channel. The returned true channel is formed
+    by adding the paper's independent zero-mean error. Its variance is rho times
+    estimated-channel power; rho is never treated as watts.
     """
     if rho_nmse <= 0.0:
-        return H_true.copy()
+        return H_hat.copy()
     rho = float(np.clip(rho_nmse, 0.0, 1.0))
-    ch_power = float(np.mean(np.abs(H_true) ** 2))
-    # Page 10 defines rho = E|H-H_hat|^2 / E|H_hat|^2. For the
-    # independent Gaussian decomposition H = H_hat + Delta, this is the
-    # conditional distribution H_hat | H.
-    estimate_scale = 1.0 / (1.0 + rho)
-    innovation_variance = rho * ch_power / (1.0 + rho) ** 2
-    innovation = _complex_normal(rng, H_true.shape) * np.sqrt(innovation_variance)
-    return estimate_scale * H_true + innovation
+    estimate_power = float(np.mean(np.abs(H_hat) ** 2))
+    # Page 10 defines rho = E|H-H_hat|^2 / E|H_hat|^2.
+    error = _complex_normal(rng, H_hat.shape) * np.sqrt(rho * estimate_power)
+    return H_hat + error
 
 
 # ─── Full Channel Set ─────────────────────────────────────────────────────────
@@ -312,71 +405,87 @@ class ChannelSet:
         self.slot_time_s = slot_time_s
         self.target_velocities = velocities.copy()
 
-        # ── True channel generation ──────────────────────────────────────────
-        # BS → HRIS  (passive and active sub-arrays)
-        G_brj_true = gen_bs_hris(
-            pos_uav, cfg.Lp, cfg.Lpx, cfg.Lpy, stream(1)
+        # ── Estimated-channel generation ─────────────────────────────────────
+        # BS → one physical HRIS UPA, then disjoint active/passive slices.
+        coordinates = hris_element_coordinates()
+        active_indices, passive_indices = hris_partition_indices(cfg.L, cfg.La)
+        self.active_element_indices = active_indices.copy()
+        self.passive_element_indices = passive_indices.copy()
+        G_br_hat = gen_bs_hris(
+            pos_uav, cfg.L, cfg.Lx, cfg.Ly, stream(1),
+            element_coordinates=coordinates,
         )
-        G_bri_true = gen_bs_hris(
-            pos_uav, cfg.La, cfg.Lax, cfg.Lay, stream(2)
-        )
+        G_brj_hat = G_br_hat[passive_indices]
+        G_bri_hat = G_br_hat[active_indices]
 
         # Direct BS → UE / TE
-        H_bu_true = [
+        H_bu_hat = [
             gen_direct(cfg.BS_pos, p, stream(3, u))
             for u, p in enumerate(pos_ues)
         ]
-        H_bk_true = [
+        H_bk_hat = [
             gen_direct(cfg.BS_pos, p, stream(4, k))
             for k, p in enumerate(pos_tes)
         ]
 
-        # HRIS → UE (passive elements only → Lp columns)
-        H_ru_true = [
-            gen_hris_ground(pos_uav, p, cfg.Lp, stream(5, u))
+        # Generate the same full physical aperture for every ground link and
+        # retain the subset used by that signal path.
+        H_ru_hat = [
+            gen_hris_ground(
+                pos_uav, p, cfg.L, stream(5, u),
+                element_coordinates=coordinates,
+            )[
+                :, passive_indices
+            ]
             for u, p in enumerate(pos_ues)
         ]
-        # HRIS → TE (active elements → La columns)
-        H_rt_true = [
+        H_rt_hat = [
             gen_hris_ground(
-                pos_uav, p, cfg.La, stream(6, k),
+                pos_uav, p, cfg.L, stream(6, k),
+                element_coordinates=coordinates,
                 target_velocity=velocities[k], time_s=slot_time_s,
-            )
+            )[:, active_indices]
             for k, p in enumerate(pos_tes)
         ]
 
-        # ── Add SCEE  (Sec. II-B, Gaussian-Kronecker normalised model) ────────
-        # s2 is the normalised MSE ρ; add_scee scales noise to channel power.
-        self.G_brj_hat = add_scee(G_brj_true, s2, stream(11))
-        self.G_bri_hat = add_scee(G_bri_true, s2, stream(12))
-        self.H_bu_hat = [
-            add_scee(h, s2, stream(13, u)) for u, h in enumerate(H_bu_true)
-        ]
-        self.H_bk_hat = [
-            add_scee(h, s2, stream(14, k)) for k, h in enumerate(H_bk_true)
-        ]
-        self.H_ru_hat = [
-            add_scee(h, s2, stream(15, u)) for u, h in enumerate(H_ru_true)
-        ]
-        self.H_rt_hat = [
-            add_scee(h, s2, stream(16, k)) for k, h in enumerate(H_rt_true)
-        ]
+        # ── SCEE covariance (Sec. II-B, Gaussian-Kronecker model) ─────────────
+        # Eqs. (21)-(25) analytically marginalize SCEE. Keep the estimated
+        # channels fixed across NMSE values and carry errors in covariance.
+        self.G_brj_hat = G_brj_hat
+        self.G_bri_hat = G_bri_hat
+        self.H_bu_hat = H_bu_hat
+        self.H_bk_hat = H_bk_hat
+        self.H_ru_hat = H_ru_hat
+        self.H_rt_hat = H_rt_hat
 
         # ── Store per-channel effective error variances  σ²_eff = ρ · E[|h|²] ─
-        # Matrix SCEE covariance routines read these effective variances.
-        def _eff(H_true):
-            if H_true.size == 0 or s2 <= 0.0:
+        def _eff_gain(pos_tx, pos_rx, element_count):
+            if int(element_count) == 0 or self.scee_nmse <= 0.0:
                 return 0.0
-            # E|H_hat|^2 = E|H|^2/(1+rho), hence
-            # E|Delta|^2 = rho*E|H_hat|^2.
-            true_power = max(float(np.mean(np.abs(H_true) ** 2)), 1e-20)
-            return (s2 / (1.0 + s2)) * true_power
-        self.sv_bu  = [_eff(h) for h in H_bu_true]        # list[U]  BS→UE
-        self.sv_bk  = [_eff(h) for h in H_bk_true]        # list[K]  BS→TE
-        self.sv_brj = _eff(G_brj_true)                     # scalar   BS→passive
-        self.sv_bri = _eff(G_bri_true)                     # scalar   BS→active
-        self.sv_ruj = [_eff(h) for h in H_ru_true]        # list[U]  passive→UE
-        self.sv_rti = [_eff(h) for h in H_rt_true]        # list[K]  active→TE
+            return self.scee_nmse * channel_gain(pos_tx, pos_rx)
+
+        # Each normalized Rician/NLoS coefficient has theoretical second
+        # moment equal to its geometry-dependent channel gain. This preserves
+        # the paper's independent CSCG error instead of scaling it by one
+        # realized estimate matrix.
+        self.sv_bu = [
+            _eff_gain(cfg.BS_pos, position, cfg.M * cfg.N)
+            for position in pos_ues
+        ]
+        self.sv_bk = [
+            _eff_gain(cfg.BS_pos, position, cfg.M * cfg.N)
+            for position in pos_tes
+        ]
+        self.sv_brj = _eff_gain(cfg.BS_pos, pos_uav, cfg.Lp * cfg.M)
+        self.sv_bri = _eff_gain(cfg.BS_pos, pos_uav, cfg.La * cfg.M)
+        self.sv_ruj = [
+            _eff_gain(pos_uav, position, cfg.Lp * cfg.N)
+            for position in pos_ues
+        ]
+        self.sv_rti = [
+            _eff_gain(pos_uav, position, cfg.La * cfg.N)
+            for position in pos_tes
+        ]
 
     # ── Convenience: composite channels Eq. after (10) ───────────────────────
     def composite_ue(self, theta: np.ndarray) -> list:

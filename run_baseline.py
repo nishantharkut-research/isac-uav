@@ -19,13 +19,29 @@ def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--seeds", required=True, help="Comma-separated, at least five")
+    parser.add_argument("--seeds", required=True, help="Comma-separated seeds")
+    parser.add_argument(
+        "--run-mode", choices=("publication", "smoke"), default="publication"
+    )
     parser.add_argument("--episodes", type=int, default=1500)
     parser.add_argument("--eval-episodes", type=int, default=5)
-    parser.add_argument("--checkpoint-every", type=int, default=10)
+    parser.add_argument("--checkpoint-every", type=int, default=1)
     parser.add_argument("--fresh", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return add_ambiguity_cli_arguments(parser)
+
+
+def parse_run_seeds(value, run_mode):
+    from experiment_protocol import parse_seeds
+
+    if run_mode == "publication":
+        return parse_seeds(value)
+    seeds = tuple(
+        int(item.strip()) for item in str(value).split(",") if item.strip()
+    )
+    if not seeds or len(seeds) != len(set(seeds)) or any(seed < 0 for seed in seeds):
+        raise ValueError("Smoke seeds must be unique nonnegative integers.")
+    return seeds
 
 
 def run(args):
@@ -41,12 +57,13 @@ def run(args):
         physical_configuration_fingerprint,
         serializable_training_result,
         write_immutable_json,
+        write_training_checkpoint_identity,
+        EVALUATION_SEED_PROTOCOL,
         TRAINING_SEED_PROTOCOL,
         derive_training_seed,
+        evaluation_scene_seed_grid,
     )
-    from parameter_profiles import (
-        activate_profile, load_calibrated_profile, load_profile,
-    )
+    from parameter_profiles import activate_profile, load_calibrated_profile
     from research_objectives import ObjectiveSpec
     from simulation import (
         train_ddpg,
@@ -55,24 +72,33 @@ def run(args):
     from scientific_preflight import run_pretraining_physical_sanity
     from source_integrity import source_tree_digest
 
-    seeds = parse_seeds(args.seeds)
-    profile = (
-        load_profile(args.profile)
-        if args.dry_run
-        else load_calibrated_profile(args.profile)
-    )
+    seeds = parse_run_seeds(args.seeds, args.run_mode)
+    profile = load_calibrated_profile(args.profile)
     activate_profile(profile)
     apply_ambiguity_arguments(args, cfg)
     objective = ObjectiveSpec.paper(target_rate_min=cfg.R_min)
     physics = physical_configuration_fingerprint(profile.digest, cfg)
-    manifest = make_run_manifest(
-        "paper_baseline", profile.digest, physics, objective.as_dict(), seeds
+    protocol = (
+        "paper_baseline"
+        if args.run_mode == "publication"
+        else "paper_baseline_smoke"
     )
+    manifest = make_run_manifest(
+        protocol,
+        profile.digest,
+        physics,
+        objective.as_dict(),
+        seeds,
+        minimum_seed_count=(5 if args.run_mode == "publication" else 1),
+    )
+    manifest["run_mode"] = args.run_mode
+    manifest["publication_eligible"] = args.run_mode == "publication"
     apply_ambiguity_manifest_fields(manifest, cfg)
     manifest["power_reference"] = cfg.PT_reference
     manifest["power_hypothesis_id"] = cfg.power_hypothesis_id
     manifest["source_tree_digest"] = source_tree_digest()
     manifest["training_seed_protocol"] = TRAINING_SEED_PROTOCOL
+    manifest["evaluation_seed_protocol"] = EVALUATION_SEED_PROTOCOL
     manifest["episodes"] = args.episodes
     manifest["evaluation_episodes"] = args.eval_episodes
     if args.episodes <= 0 or args.eval_episodes <= 0 or args.checkpoint_every <= 0:
@@ -80,10 +106,15 @@ def run(args):
             "Episodes, evaluation episodes, and checkpoint interval must be "
             "positive."
         )
-    if args.episodes != cfg.fig4_episodes:
+    if args.run_mode == "publication" and args.episodes != cfg.fig4_episodes:
         raise ValueError(
             f"Paper Figure 4 requires exactly {cfg.fig4_episodes} episodes."
         )
+    if args.run_mode == "smoke" and args.episodes not in {100, 200}:
+        raise ValueError("Smoke mode requires exactly 100 or 200 episodes.")
+    evaluation_seed_grid = evaluation_scene_seed_grid(
+        seeds, args.eval_episodes
+    )
     output = ensure_run_directory(args.output, manifest)
     if args.dry_run:
         return 0
@@ -105,10 +136,12 @@ def run(args):
         target_seed = seed + 100_000
         source_training_seed = derive_training_seed(seed, "source")
         target_training_seed = derive_training_seed(seed, "target")
+        evaluation_scene_seeds = evaluation_seed_grid[seed]
         source_tag = f"baseline-source-seed-{seed}"
         source_env = HRISUAVISACEnv(
             sigma2_scee=cfg.rho_nmse, seed=source_seed,
             objective_spec=objective,
+            allocation_mode=cfg.policy_allocation_mode,
         )
         source_path = checkpoint_dir / f"{source_tag}.pt"
         source = train_ddpg(
@@ -116,6 +149,9 @@ def run(args):
             checkpoint_path=source_path, resume=not args.fresh,
             checkpoint_every=args.checkpoint_every,
             training_seed=source_training_seed,
+        )
+        source_authority = write_training_checkpoint_identity(
+            output, source_path, source["checkpoint_identity"]
         )
 
         methods = {}
@@ -131,6 +167,7 @@ def run(args):
                 sigma2_scee=sigma2, seed=target_seed,
                 sensing_beamformer_mode=beamformer_mode,
                 objective_spec=objective,
+                allocation_mode=cfg.policy_allocation_mode,
             )
             path = checkpoint_dir / f"{tag}.pt"
             if algorithm == "ddpg":
@@ -149,23 +186,26 @@ def run(args):
                 )
 
             def environment_factory(
-                    index, sigma2=sigma2, mode=beamformer_mode):
+                    index, sigma2=sigma2, mode=beamformer_mode,
+                    scene_seeds=evaluation_scene_seeds):
                 return HRISUAVISACEnv(
                     sigma2_scee=sigma2,
-                    seed=target_seed + 10_000 + index,
+                    seed=scene_seeds[index],
                     sensing_beamformer_mode=mode,
                     objective_spec=objective,
-                    allocation_mode="scipy",
+                    allocation_mode=cfg.policy_allocation_mode,
                 )
 
             evaluation = evaluation_metrics(
                 trained["agent"], environment_factory, args.eval_episodes
             )
+            checkpoint_authority = write_training_checkpoint_identity(
+                output, path, trained["checkpoint_identity"]
+            )
             methods[method] = {
                 "tag": tag,
                 "training_seed": target_training_seed,
-                "checkpoint": str(path.relative_to(output)),
-                "checkpoint_sha256": _file_sha256(path),
+                **checkpoint_authority,
                 "training": serializable_training_result(trained),
                 "evaluation": evaluation,
             }
@@ -175,14 +215,23 @@ def run(args):
             "target_seed": target_seed,
             "source_training_seed": source_training_seed,
             "target_training_seed": target_training_seed,
+            "evaluation_scene_seeds": evaluation_scene_seeds,
             "source_tag": source_tag,
-            "source_checkpoint": str(source_path.relative_to(output)),
-            "source_checkpoint_sha256": _file_sha256(source_path),
+            "source_checkpoint": source_authority["checkpoint"],
+            "source_checkpoint_sha256": source_authority["checkpoint_sha256"],
+            "source_checkpoint_identity": source_authority[
+                "checkpoint_identity"
+            ],
+            "source_checkpoint_identity_sha256": source_authority[
+                "checkpoint_identity_sha256"
+            ],
+            "source_identity": source_authority["identity"],
+            "source_training": serializable_training_result(source),
             "methods": methods,
         })
         atomic_write_json(progress_path, {"completed_seeds": seed_records})
 
-    training_final_window = 100
+    training_final_window = min(100, args.episodes)
     final_methods = {}
     for method in ("DTL-pCSI", "DTL-WFB", "DTL-iCSI", "DDPG"):
         final_methods[method] = {
@@ -203,7 +252,9 @@ def run(args):
     summary = {
         "schema_version": 1,
         "kind": "generated_result",
-        "protocol": "paper_baseline",
+        "protocol": protocol,
+        "run_mode": args.run_mode,
+        "publication_eligible": args.run_mode == "publication",
         "physical_configuration_fingerprint": physics,
         "profile_digest": profile.digest,
         "objective": objective.as_dict(),
@@ -211,15 +262,28 @@ def run(args):
         "power_hypothesis_id": cfg.power_hypothesis_id,
         "source_tree_digest": manifest["source_tree_digest"],
         "training_seed_protocol": TRAINING_SEED_PROTOCOL,
+        "evaluation_seed_protocol": EVALUATION_SEED_PROTOCOL,
         "seeds": list(seeds),
         "episodes": args.episodes,
-        "figure4_protocol": {
-            "raw_episode_count": cfg.fig4_episodes,
-            "plot_x_start": 0,
-            "plot_x_end": 1400,
-            "plot_interval": cfg.fig4_plot_interval,
-            "acceptance_smoothing_window": 20,
-        },
+        "figure4_protocol": (
+            {
+                "raw_episode_count": cfg.fig4_episodes,
+                "plot_x_start": 0,
+                "plot_x_end": 1400,
+                "plot_interval": cfg.fig4_plot_interval,
+                "acceptance_smoothing_window": 20,
+            }
+            if args.run_mode == "publication"
+            else None
+        ),
+        "diagnostic_scope": (
+            None
+            if args.run_mode == "publication"
+            else {
+                "purpose": "early_scale_feasibility_projection_checkpoint_check",
+                "not_evidence_for_paper_curve_acceptance": True,
+            }
+        ),
         "evaluation_episodes": args.eval_episodes,
         "final_reward_source": "training_communication_rate",
         "training_final_window": training_final_window,
@@ -241,6 +305,14 @@ def run(args):
     from validate_results import result_payload_digest
     manifest["summary_payload_sha256"] = result_payload_digest(summary)
     atomic_write_json(output / "run_manifest.json", manifest)
+    if args.run_mode == "smoke":
+        from validate_results import validate_smoke_result
+
+        diagnostic = validate_smoke_result(
+            summary, result_directory=output, verify_files=True
+        )
+        atomic_write_json(output / "smoke_validation.json", diagnostic)
+        return 0
     return 0
 
 

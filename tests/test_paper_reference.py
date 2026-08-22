@@ -1,7 +1,11 @@
 import unittest
 from pathlib import Path
 
-from paper_reference import load_paper_references, paper_reference_digest
+from paper_reference import (
+    load_paper_references,
+    paper_reference_digest,
+    require_canonical_paper_references,
+)
 from cross_figure_validation import CALIBRATION_FIGURES, HOLDOUT_FIGURES
 
 
@@ -53,6 +57,13 @@ class PaperReferenceTests(unittest.TestCase):
         self.assertEqual(paper_reference_digest(path), paper_reference_digest(reference))
         reference["figures"]["4"]["curves"]["DTL-pCSI"][0] += 0.01
         self.assertNotEqual(paper_reference_digest(path), paper_reference_digest(reference))
+
+    def test_publication_reference_authority_rejects_modified_payload(self):
+        reference = load_paper_references(None)
+        reference["figures"]["4"]["curves"]["DTL-pCSI"][0] += 0.01
+
+        with self.assertRaisesRegex(ValueError, "canonical"):
+            require_canonical_paper_references(reference)
 
 
 if __name__ == "__main__":

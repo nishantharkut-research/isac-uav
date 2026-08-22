@@ -15,6 +15,17 @@ OBJECTIVE_DIM = 2
 PNG_PREFERENCE = np.array([0.5, 0.5], dtype=np.float64)
 
 
+def discounted_return_scale(gamma: float, horizon: int) -> float:
+    """Map a stationary per-step rate to its finite-horizon discounted return."""
+    gamma = float(gamma)
+    horizon = int(horizon)
+    if not 0.0 <= gamma < 1.0 or horizon <= 0:
+        raise ValueError("Discount scale requires gamma in [0, 1) and horizon > 0.")
+    if gamma == 0.0:
+        return 1.0
+    return float((1.0 - gamma ** horizon) / (1.0 - gamma))
+
+
 def _objective_array(values, name: str = "values") -> np.ndarray:
     array = np.asarray(values, dtype=np.float64)
     if array.ndim == 1:
@@ -124,6 +135,17 @@ class ParetoAnchors:
             if span is None or np.any(span <= 0.0):
                 raise ValueError("Frozen Pareto anchors require positive spans.")
         return result
+
+
+def normalized_physical_zero_reference(
+    anchors: ParetoAnchors, *, margin: float = 0.05
+) -> np.ndarray:
+    """Return a frozen reference strictly below every nonnegative rate pair."""
+    margin = float(margin)
+    if not np.isfinite(margin) or margin <= 0.0:
+        raise ValueError("Hypervolume reference margin must be positive and finite.")
+    zero = anchors.normalize([[0.0, 0.0]])[0]
+    return zero - margin
 
 
 def scalarize_returns(

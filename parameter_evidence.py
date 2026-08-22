@@ -214,6 +214,10 @@ PARAMETER_EVIDENCE = {
     "noise_std": _entry(
         "noise_std", "assumption", 0.3, (0.0, 1.0), "normalized action units",
         "Exploration process is not reported", "DDPG exploration", "low"),
+    "noise_min": _entry(
+        "noise_min", "assumption", 0.05, (0.0, 1.0),
+        "normalized action units",
+        "Terminal exploration floor is not reported", "DDPG exploration", "low"),
     "noise_decay": _entry(
         "noise_decay", "assumption", 0.999, (0.9, 1.0), "per episode",
         "Exploration schedule is not reported", "DDPG exploration", "low"),
@@ -236,7 +240,7 @@ PROFILE_KEYS = frozenset({
     "zeta_los", "zeta_nlos", "R_min", "R_u_min", "Psi_max", "P_a_max",
     "ue_x_min", "ue_x_max", "ue_y_min", "ue_y_max", "target_speed_mps",
     "v_max", "rho_nmse", "partial_csi_fraction", "comm_power_frac", "tau",
-    "noise_std", "noise_decay", "upsilon_0", "upsilon_min",
+    "noise_std", "noise_min", "noise_decay", "upsilon_0", "upsilon_min",
     "upsilon_decay",
 })
 

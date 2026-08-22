@@ -18,12 +18,12 @@ calibration, multi-seed run, and passing validators.
 
 | ID | Review finding | Disposition |
 |---|---|---|
-| A | SCEE rates jump when NMSE changes from zero | Confirmed symptom. The immediate cause was a switch from scalar Eqs. (12)/(14) at zero error to matrix Eqs. (21)/(25) at any positive error, not the paper-required use of estimated CSI in the numerator. The matrix model is now used continuously, including at zero error. |
-| B | Eq. (6) LoS constants appear swapped | Confirmed paper/model ambiguity, not a uniquely recoverable author value. Printed Eq. (6) is the reproduction primary because it also matches the paper's high-LoS/free-space text; the standard Al-Hourani role mapping is a predeclared non-selecting sensitivity. |
+| A | SCEE rates jump when NMSE changes from zero | Confirmed symptom. The immediate cause was a switch from scalar Eqs. (12)/(14) at zero error to matrix Eqs. (21)/(25) at any positive error, not the paper-required use of estimated CSI in the numerator. Continuous matrix SCEE is primary; the paper's literal scalar-pCSI/matrix-iCSI section split is a separate report-all sensitivity. |
+| B | Unnumbered LoS-formula constants appear swapped | Confirmed paper/model ambiguity, not a uniquely recoverable author value. The paper's printed form is the reproduction primary because it also matches the high-LoS/free-space text; the standard Al-Hourani role mapping is a predeclared non-selecting sensitivity. |
 | C | Eqs. (12)/(14) cross-function channels are likely inconsistent | Confirmed ambiguity. The printed equations remain primary for reproduction; receiver-consistent cross channels are a report-all sensitivity. Both scalar and matrix rate paths implement the same selected hypothesis. |
 | D | Power selection accepts pCSI/iCSI inversion | Confirmed and fixed. Any candidate with an ordering violation is inadmissible. |
 | E | Constraint values were derived from one arbitrary pre-calibration candidate | Confirmed and removed from the identification path. `R_min`, `Psi_max`, and `P_a_max` are disclosed omitted-parameter assumptions/sensitivities, not result-derived structural parameters. |
-| F/G | Power response and policy-action response are nearly flat | Confirmed as required fail-closed invariants. Structural selection checks action response, Figure 6 calibration checks power response and curve fidelity, and a deterministic pre-training action-response gate runs before any real baseline training. |
+| F/G | Power response and policy-action response are nearly flat | Confirmed and exposed. Structural preparation and Figure 6 calibration retain declared acceptance checks. The baseline launcher records a deterministic pre-training action-response diagnostic, but weak response is advisory and never terminates training. |
 | J | SLSQP repeatedly recomputes identical assessments | Confirmed and fixed with exact-input assessment reuse. |
 | K | BA-PCDTL resume does not bind Pareto anchors | Confirmed and fixed. The canonical anchor digest is part of both agent and run checkpoint contracts. |
 | L | Pareto anchors include early random episodes and extrema | Confirmed risk and fixed. Anchors use the converged training tail and 5th/95th quantiles, with estimator provenance frozen into the anchor identity. |
@@ -32,30 +32,48 @@ calibration, multi-seed run, and passing validators.
 
 ## Additional Defects Found During Correction
 
-The policy state exposed one instantaneous CSI realization, but the environment
-sampled another small-scale realization before evaluating the action. The
-transition order now evaluates the proposal on the realization represented by
-the current state, then samples the next realization before returning the next
-instantaneous-CSI state. This follows the order in Algorithm 1 without making
-the observed channel irrelevant to the action. Episode-block fading remains a
-declared sensitivity, and coherence identity plus latent seed are
-checkpoint-bound.
+The policy state exposed one phase-dependent composite realization while the
+environment changed geometry before evaluating the action. The primary state
+now exposes all estimated primitive channel tensors, so alternative HRIS phases
+remain identifiable. Phases/gains are scored on the observed current channel;
+UAV/target motion determines the next geometry; the next channel and precoders
+are constructed atomically. Episode-block fading remains a declared
+sensitivity, and coherence identity plus latent seed are checkpoint-bound.
+The normalization scale for primitive instantaneous/partial CSI is also part
+of the observation, so two different absolute channel magnitudes cannot become
+the same normalized state while producing different noise-limited SINRs.
 
-The implementation also exposed estimated channel coefficients in every iCSI
-state even though Section III says statistical CSI contains HRIS phases and
-precoders, with coefficients added for instantaneous CSI. Statistical states
-now omit channel coefficients; pCSI includes them; ParCSI explicitly opts into
-a deterministic masked channel observation.
+CSI estimation quality and state observability were previously coupled. They
+are now separate, fingerprinted axes. The primary exposes zero-NMSE primitive
+estimates for pCSI, nonzero-NMSE estimates for iCSI, and masked estimates for
+ParCSI because the SCEE section defines iCSI through channel estimates. The
+alternative statistical-iCSI reading omits channel coefficients and is retained
+as a non-selecting sensitivity because Section III also describes a statistical
+state without labeling which plotted CSI curve uses it.
 
-Equation (16c) was implemented as a sum of per-element powers. The paper places
-the passive-element sum inside the squared norm, so cross-element coherent terms
-were missing. The implementation now evaluates the coherent matrix sum before
-the squared Frobenius norm.
+Equation (16c) places the squared norm inside the sum over passive elements.
+The earlier coherent-sum implementation incorrectly introduced cross-element
+terms and allowed opposite phases to cancel physical element powers. The code
+now sums the per-element squared Frobenius norms and uses the worst user because
+the printed constraint omits its communication-user index.
 
-Replay previously stored the feasibility-projected action while actor and target
-updates queried the critic at the raw policy proposal. Replay now stores the
-proposal and treats deterministic projection as environment dynamics. Both the
-proposal and executed action remain in transition diagnostics.
+Replay previously mixed proposal and feasibility-projected action semantics.
+Replay now stores the executed physical action that produced the recorded
+reward, so critic training remains consistent with the environment transition.
+The raw proposal and executed action are available in each in-memory step
+diagnostic; persisted results retain aggregate projection/recovery evidence.
+
+The original channel construction also generated active and passive HRIS paths
+as separate overlapping apertures. The corrected primary implements Eq. (9)'s
+`La=Lax*Lay` active rectangular response and places disjoint active/passive
+rectangular subarrays next to one another on one physical aperture. Both slices
+come from the same BS-HRIS and HRIS-ground realization. The former interleaved
+full-UPA reading remains an explicit sensitivity.
+
+Cross-dimensional DTL previously skipped source-Q evaluation when pCSI added
+state features, which silently removed the Eq. (30) source term. The source
+network is now evaluated on the exact shared state prefix, added target input
+columns start at zero, and incompatible action dimensions fail closed.
 
 ## Calibration Acceptance
 
@@ -74,7 +92,7 @@ select the less-bad branch and does not proceed to DRL training.
 
 Calibration now uses the Figure 6 system contract (`M=4`, `N=2`, `U=K=3`,
 `L=20`, `La=Lp=10`) instead of silently inheriting the default `L=40` system.
-The equal active/passive split is a disclosed assumption required to reconcile
+The equal active/passive split is a disclosed feasible assumption used to reconcile
 Figure 6's `L=20` with the paper's otherwise contradictory `La=20` statement and
 `La <= Lp` constraint. Calibration artifacts are also source-tree bound and
 explicitly identify the SciPy AO surrogate; an artifact from old executable
@@ -92,9 +110,10 @@ and closure are enforced as hard feasibility conditions.
 
 The primary is fixed before results are viewed. Closed sensitivity registries
 cover noise mapping, transfer update, transfer schedule, WFB replacement, DDPG
-CSI, LoS probability, channel coherence, and cross-function interference. The
-one-at-a-time design has one primary plus eight alternatives. The optional full
-factorial has 256 scenarios. Sensitivity reports contain paired deltas but no
+CSI, LoS probability, channel coherence, CSI observability, zero-error rate
+functional, and cross-function interference. The one-at-a-time design has one
+primary plus eleven alternatives. The optional full factorial has 1536
+scenarios. Sensitivity reports contain paired deltas but no
 winner-selection field.
 
 ## Checkpoint and Evidence Integrity
@@ -104,6 +123,35 @@ environment, histories, and RNG state. BA-PCDTL additionally binds frozen
 Pareto anchors and preference-stream position. Run manifests and plot sidecars
 include every physical ambiguity identity. A source, profile, anchor, seed,
 objective, or hypothesis mismatch fails resume and evidence validation.
+Completed-result validation also opens every checkpoint and binds its internal
+identity, requested/completed episode count, history keys, and finite raw
+histories to the serialized result row. Recomputed outer hashes cannot conceal
+an unrelated or edited checkpoint payload.
+For DTL, the source-network digest is recomputed from both the accepted source
+checkpoint and the source agent embedded in the target checkpoint; both must
+match the target identity.
+Evaluation evidence separately records action-projection rate, mean retained
+action fraction, deterministic-recovery rate, and allocation-fallback rate.
+Training, validation, and test use the same fast-grid allocator with a
+same-channel SciPy feasibility fallback. Validators reject evidence above
+`0.10` action projection or `0.01` deterministic recovery, or below `0.95`
+mean retained-action fraction.
+
+Extension objective references are reconstructed from the accepted baseline's
+final 100 training episodes, not held-out evaluation scenes. Each requested
+evaluation episode is actually executed and preserved in nested raw evidence.
+All methods for a research seed use the same SHA-256-derived scene block, and
+blocks are globally unique across research seeds and disjoint from training.
+The conservative ensemble gate is explicitly a deterministic mean-minus-spread
+score, not a calibrated confidence interval. Publication hypervolume compares
+ungated BA-PCDTL with ungated independent policies so fallback cannot inflate
+the algorithmic Pareto claim. Non-balanced critic values are converted from
+discounted-return units to rate-equivalent units before frozen-anchor
+scalarization. At the balanced PNG preference, the rate-equivalent joint value
+is divided only by one frozen positive span, preserving exactly the physical
+`Q_c+Q_s` argmax while keeping actor utilities dimensionless. The hypervolume
+reference is locked below normalized physical zero, and validators reconstruct
+both anchors and the complete gate grid.
 
 Preparation status, structural search, holdout, stress, preflight, calibrated
 profile, calibration report, and power lock now carry and validate the same
@@ -115,9 +163,9 @@ feasibility can no longer be reported as improvement.
 ## Remaining Reproduction Boundary
 
 The code does not implement the complete MMSE/CVX/SCA AO procedure in paper
-Algorithms 2-3. Its AO path is a constrained SciPy surrogate with beam
-direction/power allocation, direct phase optimization, and a one-step UAV
-trajectory block. The paper also omits the executable coherence interval for
+Algorithms 2-3. Its AO path is a fixed-geometry constrained SciPy surrogate
+with constructed ZF/matched-filter directions, stream-power allocation, direct
+HRIS-control optimization, and terminal-iterate reporting. The paper also omits the executable coherence interval for
 Eq. (19), the exact DDPG comparator CSI, partial-CSI mask construction, transfer
 domains, and enough detail to recover Eq. (30) as unique code. These are locked
 assumptions or report-all sensitivities, not hidden fitted choices.
@@ -132,7 +180,8 @@ equivalence.
 
 Follow `REPRODUCTION_GUIDE.md` from preparation onward in new empty `runs`
 directories. Do not copy the earlier calibration or checkpoints. The baseline
-runner automatically performs a no-training action-response and feasibility
-gate before creating training checkpoints. A failed calibration, pre-training
-gate, baseline validator, or holdout validator means reproduction has not been
-established and the extension must not be presented as an improvement.
+runner automatically records a no-training action-response and feasibility
+diagnostic before creating training checkpoints; weak response never stops the
+run. A failed calibration, baseline validator, or holdout validator means
+reproduction has not been established and the extension must not be presented
+as an improvement.

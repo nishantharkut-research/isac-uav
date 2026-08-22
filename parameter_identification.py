@@ -35,8 +35,6 @@ ACTION_PROBE_LABELS = (
     "zero_active", "half_active", "full_active",
     "phase_variant_half", "phase_variant_full",
 )
-SENSING_FLOOR_SAFETY = 0.5
-UPPER_CONSTRAINT_HEADROOM = 2.0
 MINIMUM_COMM_ACTION_RESPONSE = 0.005
 
 _SEARCH_KEYS = (
@@ -132,38 +130,6 @@ def profile_prior_distance(profile):
             distance = abs(value - prior) / denominator
         distances.append(float(distance))
     return float(np.mean(distances)) if distances else 0.0
-
-
-def derive_constraint_values(raw_scenes):
-    """Derive conservative limits from calibration extrema, not paper curves."""
-    if not raw_scenes:
-        raise ValueError("raw calibration scenes are required")
-    for key in ("min_sensing_rate", "P_ai_envelope", "cascade_power"):
-        values = np.asarray([row[key] for row in raw_scenes], dtype=float)
-        if values.size == 0 or not np.all(np.isfinite(values)):
-            raise ValueError(f"cannot derive {key} from non-finite scenes")
-    sensing = np.asarray(
-        [row["min_sensing_rate"] for row in raw_scenes], dtype=float
-    )
-    active = np.asarray(
-        [row["P_ai_envelope"] for row in raw_scenes], dtype=float
-    )
-    cascade = np.asarray(
-        [row["cascade_power"] for row in raw_scenes], dtype=float
-    )
-    return {
-        "R_min": float(np.clip(
-            SENSING_FLOOR_SAFETY * np.min(sensing), 1e-6, 4.0
-        )),
-        "P_a_max": float(np.clip(
-            UPPER_CONSTRAINT_HEADROOM * np.max(active),
-            max(float(cfg.sigma2_qa) * 1.001, 1e-12),
-            10.0,
-        )),
-        "Psi_max": float(np.clip(
-            UPPER_CONSTRAINT_HEADROOM * np.max(cascade), 1e-20, 1.0
-        )),
-    }
 
 
 def _scene(seed):
@@ -265,7 +231,7 @@ def evaluate_candidate(profile, seeds=CALIBRATION_SEEDS,
                     comm_rate = float(np.sum(rate_u))
                     sensing_rate = float(np.sum(rate_k))
                     min_sensing_rate = float(np.min(rate_k))
-                    p_ai = active_tx_power(channel, T, phi)
+                    p_ai = active_tx_power(channel, C, T, phi)
                     cascade_power = cascade_power_16c(channel, theta)
                     total_power = float(
                         np.linalg.norm(C, "fro") ** 2
@@ -386,60 +352,6 @@ def evaluate_candidate(profile, seeds=CALIBRATION_SEEDS,
         "raw_scenes": raw_scenes,
         "errors": errors,
     }
-
-
-def calibrate_constraint_profile(profile, seeds=CALIBRATION_SEEDS):
-    """Replace omitted limits from unconstrained calibration extrema."""
-    pilot_metrics = evaluate_candidate(
-        profile, seeds=seeds, sensing_rate_min=0.0
-    )
-    if pilot_metrics["errors"] or pilot_metrics["finite_fraction"] != 1.0:
-        raise RuntimeError("constraint calibration pilot did not produce finite scenes")
-    derived = derive_constraint_values(pilot_metrics["raw_scenes"])
-    raw_extrema = {
-        "minimum_sensing_rate": float(min(
-            row["min_sensing_rate"]
-            for row in pilot_metrics["raw_scenes"]
-        )),
-        "maximum_active_power_envelope": float(max(
-            row["P_ai_envelope"]
-            for row in pilot_metrics["raw_scenes"]
-        )),
-        "maximum_cascade_power": float(max(
-            row["cascade_power"]
-            for row in pilot_metrics["raw_scenes"]
-        )),
-    }
-    values = dict(profile.values)
-    values.update(derived)
-    payload = {
-        "schema_version": 1,
-        "name": profile.name,
-        "kind": "candidate",
-        "values": values,
-        "evidence": {key: key for key in values},
-        "selection": {
-            **dict(profile.selection),
-            "constraint_calibration": {
-                "R_min": "0.5 times minimum raw target rate",
-                "P_a_max": (
-                    "2 times maximum analytical full-gain Eq. (18) envelope"
-                ),
-                "Psi_max": "2 times maximum raw Eq. (16c) cascade power",
-                "action_probes": list(ACTION_PROBE_LABELS),
-                "seeds": list(seeds),
-                "communication_rate_magnitude_used": False,
-                "raw_extrema": raw_extrema,
-                "selected_values": dict(derived),
-                "evidence_bounds_enforced": {
-                    key: list(PARAMETER_EVIDENCE[key].bounds)
-                    for key in ("R_min", "P_a_max", "Psi_max")
-                },
-            },
-            "provisional_profile_digest": profile.digest,
-        },
-    }
-    return profile_from_mapping(payload)
 
 
 def _finite_numeric_tree(value):

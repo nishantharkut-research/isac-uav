@@ -15,7 +15,9 @@ from checkpointing import (
     save_training_checkpoint,
     validate_training_histories,
 )
+from experiment_protocol import PROJECTION_EVIDENCE_KEYS, step_projection_evidence
 from pareto_protocol import validate_preferences
+from training_progress import PROGRESS_INTERVAL_EPISODES, progress_snapshot
 
 
 HISTORY_KEYS = (
@@ -102,7 +104,7 @@ def _require_step_info(info: Mapping) -> tuple[float, float, np.ndarray]:
     required = (
         "communication_sum_rate",
         "sensing_sum_rate",
-        "proposed_action",
+        "executed_action",
         "physical_constraints_feasible",
     )
     missing = [key for key in required if key not in info]
@@ -112,10 +114,10 @@ def _require_step_info(info: Mapping) -> tuple[float, float, np.ndarray]:
     sensing = float(info["sensing_sum_rate"])
     if not np.isfinite(communication) or not np.isfinite(sensing):
         raise ValueError("Physical reward components must be finite.")
-    proposed_action = np.asarray(info["proposed_action"], dtype=np.float32)
-    if not np.all(np.isfinite(proposed_action)):
-        raise ValueError("Proposed action must be finite.")
-    return communication, sensing, proposed_action
+    executed_action = np.asarray(info["executed_action"], dtype=np.float32)
+    if not np.all(np.isfinite(executed_action)):
+        raise ValueError("Executed action must be finite.")
+    return communication, sensing, executed_action
 
 
 def train_ba_pcdtl(
@@ -127,7 +129,7 @@ def train_ba_pcdtl(
     checkpoint_path,
     *,
     resume: bool = True,
-    checkpoint_every: int = 10,
+    checkpoint_every: int = 1,
     stop_after_episode: int | None = None,
     fixed_preference=None,
 ) -> dict:
@@ -200,10 +202,10 @@ def train_ba_pcdtl(
                 return_info=True,
             )
             next_state, _ignored_scalar_reward, done, info = environment.step(action)
-            communication, sensing, proposed_action = _require_step_info(info)
+            communication, sensing, executed_action = _require_step_info(info)
             agent.replay.push(
                 state,
-                proposed_action,
+                executed_action,
                 [communication, sensing],
                 next_state,
                 done,
@@ -238,6 +240,23 @@ def train_ba_pcdtl(
             totals["residual_scale"] / step_count
         )
         histories["baseline_fallback_rate"].append(totals["fallback"] / step_count)
+
+        if (
+            episode_index % PROGRESS_INTERVAL_EPISODES == 0
+            or episode_index == n_episodes
+            or episode_index == stop_episode
+        ):
+            progress = progress_snapshot(
+                episode_index, n_episodes, time.time() - started
+            )
+            recent = histories["joint"][-PROGRESS_INTERVAL_EPISODES:]
+            print(
+                f"  Ep {episode_index:4d}/{n_episodes}  |  "
+                f"avg_joint={np.mean(recent):.3f}  |  "
+                f"elapsed={progress['elapsed_seconds'] / 3600.0:.2f}h  |  "
+                f"eta={progress['eta_seconds'] / 3600.0:.2f}h",
+                flush=True,
+            )
 
         if (
             episode_index % checkpoint_every == 0
@@ -279,12 +298,16 @@ def evaluate_preference_grid(
     scene_seeds,
     preferences,
     *,
+    evaluation_episodes: int = 1,
     use_gate: bool = True,
 ) -> dict:
     """Evaluate each method/preference separately and retain unsmoothed arrays."""
     seed_list = [int(seed) for seed in scene_seeds]
     if not seed_list or len(seed_list) != len(set(seed_list)):
         raise ValueError("scene_seeds must be a nonempty unique sequence.")
+    evaluation_episodes = int(evaluation_episodes)
+    if evaluation_episodes <= 0:
+        raise ValueError("evaluation_episodes must be positive.")
     preference_array = validate_preferences(preferences)
     records = []
     for preference in preference_array:
@@ -300,63 +323,128 @@ def evaluate_preference_grid(
             "feasibility": [],
             "mean_residual_scale": [],
             "baseline_fallback_rate": [],
+            "episode_evidence": [],
+            **{key: [] for key in PROJECTION_EVIDENCE_KEYS},
         }
         for seed in seed_list:
             environment = environment_factory(seed)
-            state = environment.reset()
-            done = False
-            communication_values = []
-            sensing_values = []
-            minimum_ue_values = []
-            minimum_target_values = []
-            feasibility_values = []
-            residual_scales = []
-            fallbacks = []
-            while not done:
-                action, action_info = agent.select_action(
-                    state,
-                    preference,
-                    explore=False,
-                    use_gate=use_gate,
-                    return_info=True,
+            episode = {
+                "scene_seed": seed,
+                "communication": [],
+                "sensing": [],
+                "joint": [],
+                "objective": [],
+                "minimum_ue_rate": [],
+                "minimum_target_rate": [],
+                "feasibility": [],
+                "mean_residual_scale": [],
+                "baseline_fallback_rate": [],
+                **{key: [] for key in PROJECTION_EVIDENCE_KEYS},
+            }
+            for _episode_index in range(evaluation_episodes):
+                state = environment.reset()
+                done = False
+                communication_values = []
+                sensing_values = []
+                minimum_ue_values = []
+                minimum_target_values = []
+                feasibility_values = []
+                residual_scales = []
+                fallbacks = []
+                projection_evidence = {
+                    key: [] for key in PROJECTION_EVIDENCE_KEYS
+                }
+                while not done:
+                    action, action_info = agent.select_action(
+                        state,
+                        preference,
+                        explore=False,
+                        use_gate=use_gate,
+                        return_info=True,
+                    )
+                    state, _ignored_scalar_reward, done, info = environment.step(
+                        action
+                    )
+                    communication, sensing, _executed_action = _require_step_info(
+                        info
+                    )
+                    rate_u = np.asarray(info.get("rate_u"), dtype=np.float64)
+                    rate_k = np.asarray(info.get("rate_k"), dtype=np.float64)
+                    if (
+                        rate_u.size == 0
+                        or rate_k.size == 0
+                        or not np.all(np.isfinite(rate_u))
+                        or not np.all(np.isfinite(rate_k))
+                    ):
+                        raise ValueError(
+                            "Evaluation requires finite UE and target rate arrays."
+                        )
+                    communication_values.append(communication)
+                    sensing_values.append(sensing)
+                    minimum_ue_values.append(float(np.min(rate_u)))
+                    minimum_target_values.append(float(np.min(rate_k)))
+                    feasibility_values.append(
+                        float(bool(info["physical_constraints_feasible"]))
+                    )
+                    residual_scales.append(float(action_info["residual_scale"]))
+                    fallbacks.append(
+                        float(action_info["fallback_reason"] is not None)
+                    )
+                    for key, value in step_projection_evidence(info).items():
+                        projection_evidence[key].append(value)
+                communication_mean = float(np.mean(communication_values))
+                sensing_mean = float(np.mean(sensing_values))
+                episode["communication"].append(communication_mean)
+                episode["sensing"].append(sensing_mean)
+                episode["joint"].append(communication_mean + sensing_mean)
+                episode["objective"].append(communication_mean + sensing_mean)
+                episode["minimum_ue_rate"].append(
+                    float(np.min(minimum_ue_values))
                 )
-                state, _ignored_scalar_reward, done, info = environment.step(action)
-                communication, sensing, _proposed_action = _require_step_info(info)
-                rate_u = np.asarray(info.get("rate_u"), dtype=np.float64)
-                rate_k = np.asarray(info.get("rate_k"), dtype=np.float64)
-                if (
-                    rate_u.size == 0
-                    or rate_k.size == 0
-                    or not np.all(np.isfinite(rate_u))
-                    or not np.all(np.isfinite(rate_k))
-                ):
-                    raise ValueError("Evaluation requires finite UE and target rate arrays.")
-                communication_values.append(communication)
-                sensing_values.append(sensing)
-                minimum_ue_values.append(float(np.min(rate_u)))
-                minimum_target_values.append(float(np.min(rate_k)))
-                feasibility_values.append(
-                    float(bool(info["physical_constraints_feasible"]))
+                episode["minimum_target_rate"].append(
+                    float(np.min(minimum_target_values))
                 )
-                residual_scales.append(float(action_info["residual_scale"]))
-                fallbacks.append(float(action_info["fallback_reason"] is not None))
-            communication_mean = float(np.mean(communication_values))
-            sensing_mean = float(np.mean(sensing_values))
-            metrics["communication"].append(communication_mean)
-            metrics["sensing"].append(sensing_mean)
-            metrics["joint"].append(communication_mean + sensing_mean)
-            metrics["objective"].append(communication_mean + sensing_mean)
-            metrics["minimum_ue_rate"].append(float(np.min(minimum_ue_values)))
-            metrics["minimum_target_rate"].append(
-                float(np.min(minimum_target_values))
-            )
-            metrics["feasibility"].append(float(np.mean(feasibility_values)))
-            metrics["mean_residual_scale"].append(float(np.mean(residual_scales)))
-            metrics["baseline_fallback_rate"].append(float(np.mean(fallbacks)))
+                episode["feasibility"].append(
+                    float(np.mean(feasibility_values))
+                )
+                episode["mean_residual_scale"].append(
+                    float(np.mean(residual_scales))
+                )
+                episode["baseline_fallback_rate"].append(
+                    float(np.mean(fallbacks))
+                )
+                for key in PROJECTION_EVIDENCE_KEYS:
+                    episode[key].append(float(np.mean(projection_evidence[key])))
+            metrics["episode_evidence"].append(episode)
+            for key in ("communication", "sensing", "joint", "objective"):
+                metrics[key].append(float(np.mean(episode[key])))
+            for key in ("minimum_ue_rate", "minimum_target_rate"):
+                metrics[key].append(float(np.min(episode[key])))
+            for key in (
+                "feasibility", "mean_residual_scale", "baseline_fallback_rate",
+                *PROJECTION_EVIDENCE_KEYS,
+            ):
+                metrics[key].append(float(np.mean(episode[key])))
         records.append(metrics)
-    return {
+    result = {
         "schema_version": 1,
         "scene_seeds": seed_list,
+        "evaluation_episodes": evaluation_episodes,
         "preferences": records,
         "use_gate": bool(use_gate),
     }
+    if use_gate:
+        coefficient = float(agent.uncertainty_coefficient)
+        margin = float(agent.gate_margin)
+        if (
+            not np.isfinite(coefficient)
+            or coefficient < 0.0
+            or not np.isfinite(margin)
+            or margin < 0.0
+        ):
+            raise ValueError("Gate configuration must be finite and nonnegative.")
+        result["gate_configuration"] = {
+            "uncertainty_coefficient": coefficient,
+            "margin": margin,
+        }
+    return result

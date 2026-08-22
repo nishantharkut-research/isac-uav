@@ -25,7 +25,10 @@ class ConservativeGateTests(unittest.TestCase):
         self.assertEqual(decision.scale, 1.0)
         self.assertEqual(decision.selected_index, 2)
         self.assertIsNone(decision.fallback_reason)
-        self.assertGreater(decision.selected_lcb, decision.baseline_value + 0.1)
+        self.assertGreater(
+            decision.selected_conservative_score,
+            decision.baseline_value + 0.1,
+        )
 
     def test_tie_or_insufficient_margin_returns_baseline(self):
         values = np.array([[2.0, 2.1], [2.0, 1.9]])

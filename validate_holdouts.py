@@ -6,7 +6,7 @@ from pathlib import Path
 
 from experiment_protocol import atomic_write_json
 from holdout_protocol import validate_holdout_result
-from paper_reference import load_paper_references
+from paper_reference import require_canonical_paper_references
 
 
 def main(argv=None):
@@ -18,7 +18,7 @@ def main(argv=None):
     parser.add_argument("--output", required=True)
     args = parser.parse_args(argv)
     summary = json.loads(Path(args.summary).read_text(encoding="utf-8"))
-    references = load_paper_references(args.reference)
+    references = require_canonical_paper_references(args.reference)
     report = validate_holdout_result(
         summary,
         references,

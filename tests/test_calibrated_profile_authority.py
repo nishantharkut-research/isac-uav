@@ -1,4 +1,5 @@
 import inspect
+import hashlib
 import json
 import tempfile
 import unittest
@@ -12,10 +13,15 @@ from calibrate_reproduction import (
 )
 from parameter_profiles import load_calibrated_profile, profile_from_mapping
 from paper_contract import FIGURE_6_SYSTEM_CONFIGURATION
+from paper_reference import paper_reference_digest
 from source_integrity import source_tree_digest
 
 
 class CalibratedProfileAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def _file_sha256(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
     @staticmethod
     def _base_profile():
         return profile_from_mapping({
@@ -27,9 +33,14 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
             "selection": {"purpose": "test fixture"},
         })
 
-    def _write_pair(self, directory, fixed_sensitivity_values=None):
+    def _write_pair(
+        self, directory, fixed_sensitivity_values=None, reference_digest=None
+    ):
         directory = Path(directory)
-        reference_digest = "f" * 64
+        reference_digest = (
+            paper_reference_digest(None)
+            if reference_digest is None else reference_digest
+        )
         fixed_sensitivity_values = dict(fixed_sensitivity_values or {})
         result = CalibrationResult(
             selected_values={"omega_0": 2e-3},
@@ -75,6 +86,13 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
             paper_reference_sha256=reference_digest,
             fixed_sensitivity_values=fixed_sensitivity_values,
         )
+        rejected_report_path = directory / "calibration_report_dbw.json"
+        rejected_report = json.loads(report_path.read_text(encoding="utf-8"))
+        rejected_report["power_hypothesis_id"] = "paper_db_as_dbw"
+        rejected_report["profile_digest"] = None
+        rejected_report_path.write_text(
+            json.dumps(rejected_report, sort_keys=True), encoding="utf-8"
+        )
         lock = {
             "schema_version": 1,
             "kind": "power_hypothesis_selection_lock",
@@ -85,6 +103,38 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
             "selected_profile": "calibrated_profile.json",
             "paper_reference_sha256": reference_digest,
             "common_random_seeds": [21000, 21001, 21002, 21003, 21004],
+            "calibration_budgets": {
+                "ao_iterations": 6,
+                "optimizer_max_iterations": 30,
+            },
+            "calibration_hypotheses": {
+                "calibration_noise_hypothesis_id":
+                    "description_literal_target_matches_ue",
+                "los_probability_hypothesis_id":
+                    "paper_unnumbered_los_literal_roles",
+                "rate_model_hypothesis_id":
+                    "continuous_matrix_scee_all_csi_qualities",
+                "cross_function_interference_hypothesis_id":
+                    "paper_eq12_eq14_literal_cross_channels",
+            },
+            "fixed_sensitivity_values": fixed_sensitivity_values,
+            "source_profile_digest": profile.selection["source_profile_digest"],
+            "candidate_artifacts": {
+                "paper_db_as_dbm": {
+                    "calibration_report": "calibration_report.json",
+                    "calibration_report_sha256": self._file_sha256(report_path),
+                    "calibrated_profile": "calibrated_profile.json",
+                    "calibrated_profile_sha256": self._file_sha256(profile_path),
+                },
+                "paper_db_as_dbw": {
+                    "calibration_report": "calibration_report_dbw.json",
+                    "calibration_report_sha256": self._file_sha256(
+                        rejected_report_path
+                    ),
+                    "calibrated_profile": None,
+                    "calibrated_profile_sha256": None,
+                },
+            },
             "candidate_scores": [
                 {
                     "hypothesis_id": "paper_db_as_dbm",
@@ -102,7 +152,8 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
                 },
             ],
             "calibration_solver_scope": (
-                "scipy_ao_surrogate_not_author_algorithm3"
+                "fixed_geometry_scipy_ao_surrogate_terminal_iterate_"
+                "not_author_algorithms_2_3"
             ),
             "calibration_system": dict(FIGURE_6_SYSTEM_CONFIGURATION),
             "source_tree_digest": source_tree_digest(),
@@ -121,6 +172,28 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
                 loaded.selection["calibration_noise_hypothesis_id"],
                 "description_literal_target_matches_ue",
             )
+            self.assertEqual(
+                loaded.selection["rate_model_hypothesis_id"],
+                "continuous_matrix_scee_all_csi_qualities",
+            )
+
+    def test_internally_consistent_noncanonical_paper_reference_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path, _report_path, _profile = self._write_pair(
+                directory, reference_digest="f" * 64
+            )
+            with self.assertRaisesRegex(ValueError, "canonical paper reference"):
+                load_calibrated_profile(profile_path)
+
+    def test_calibration_lock_hash_rejects_otherwise_ignored_report_tamper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path, report_path, _expected = self._write_pair(directory)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["unbound_note"] = "tampered"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "artifact hash"):
+                load_calibrated_profile(profile_path)
 
     def test_fixed_sensitivity_authority_is_accepted_and_tamper_evident(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -184,6 +257,16 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             profile_path, report_path, _profile = self._write_pair(directory)
             report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["rate_model_hypothesis_id"] = (
+                "paper_split_scalar_pcsi_matrix_icsi"
+            )
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "rate-model"):
+                load_calibrated_profile(profile_path)
+
+        with tempfile.TemporaryDirectory() as directory:
+            profile_path, report_path, _profile = self._write_pair(directory)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
             report["cross_function_interference_hypothesis_id"] = (
                 "receiver_consistent_cross_channels"
             )
@@ -227,13 +310,24 @@ class CalibratedProfileAuthorityTests(unittest.TestCase):
     def test_dedicated_runners_use_calibrated_authority_loader(self):
         import calibrate_reproduction
         import run_baseline
+        import run_ambiguity_sensitivity
         import run_extension
+        import run_pareto_extension
 
         self.assertIn(
             "load_prepared_profile", inspect.getsource(calibrate_reproduction.main)
         )
         self.assertIn("load_calibrated_profile", inspect.getsource(run_baseline.run))
         self.assertIn("load_calibrated_profile", inspect.getsource(run_extension.run))
+        for runner in (
+            run_baseline.run,
+            run_extension.run,
+            run_pareto_extension.run,
+            run_ambiguity_sensitivity.run,
+        ):
+            source = inspect.getsource(runner)
+            self.assertIn("load_calibrated_profile", source)
+            self.assertNotIn("load_profile(args.profile)", source)
 
         root = Path(__file__).parents[1]
         for filename in ("main.py", "run_all_figs.py"):

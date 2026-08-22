@@ -294,32 +294,6 @@ def test_structural_candidate_generation_is_deterministic_and_bounded():
         assert values["P_a_max"] == 10.0
 
 
-def test_constraint_derivation_uses_conservative_extrema_not_rate_level():
-    from parameter_identification import derive_constraint_values
-
-    raw = [
-        {
-            "comm_rate": 1.0 + index,
-            "min_sensing_rate": value,
-            "P_ai": value * 1e-8,
-            "P_ai_envelope": value * 2e-8,
-            "cascade_power": value * 1e-12,
-        }
-        for index, value in enumerate((1.0, 2.0, 3.0, 4.0))
-    ]
-    changed_rates = [dict(row, comm_rate=1000.0 * row["comm_rate"]) for row in raw]
-    first = derive_constraint_values(raw)
-    second = derive_constraint_values(changed_rates)
-    assert first == second
-    assert first["R_min"] == 0.5 * min([1.0, 2.0, 3.0, 4.0])
-    assert np.isclose(first["P_a_max"], 2.0 * max(
-        [2e-8, 4e-8, 6e-8, 8e-8]
-    ))
-    assert np.isclose(first["Psi_max"], 2.0 * max(
-        [1e-12, 2e-12, 3e-12, 4e-12]
-    ))
-
-
 def test_calibration_and_holdout_seed_sets_are_disjoint():
     from parameter_identification import (
         CALIBRATION_SEEDS,

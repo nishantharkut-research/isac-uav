@@ -142,8 +142,13 @@ class HoldoutProtocolTests(unittest.TestCase):
             "dtl_transfer_schedule_id": "constant_upsilon",
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
-            "los_probability_hypothesis_id": "paper_eq6_literal_roles",
+            "los_probability_hypothesis_id":
+                "paper_unnumbered_los_literal_roles",
             "channel_coherence_hypothesis_id": "episode_block_fading",
+            "csi_observation_hypothesis_id":
+                "pcsi_instantaneous_icsi_statistical",
+            "rate_model_hypothesis_id":
+                "continuous_matrix_scee_all_csi_qualities",
             "cross_function_interference_hypothesis_id":
                 "paper_eq12_eq14_literal_cross_channels",
             "baseline_payload_sha256": "b" * 64,
@@ -282,6 +287,8 @@ class HoldoutProtocolTests(unittest.TestCase):
                         "ddpg_comparator_csi_hypothesis_id",
                         "los_probability_hypothesis_id",
                         "channel_coherence_hypothesis_id",
+                        "csi_observation_hypothesis_id",
+                        "rate_model_hypothesis_id",
                         "cross_function_interference_hypothesis_id",
                     )
                 },

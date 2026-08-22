@@ -25,32 +25,35 @@ class AmbiguityProtocolTests(unittest.TestCase):
     def test_one_factor_plan_has_primary_and_each_single_axis_alternative(self):
         plan = build_sensitivity_plan("one_at_a_time")
         self.assertEqual(plan["design"], "one_at_a_time")
-        self.assertEqual(len(plan["scenarios"]), 9)
+        self.assertEqual(len(plan["scenarios"]), 12)
         self.assertEqual(
             [scenario["id"] for scenario in plan["scenarios"]],
             [
                 "primary",
                 "noise_dual_minus70",
-                "transfer_next_state",
+                "transfer_current_q_bellman",
+                "transfer_literal_current_q",
                 "schedule_linear_annealed",
                 "wfb_channel_independent_dft",
                 "ddpg_icsi_comparator",
                 "los_standard_mapped_roles",
                 "episode_block_fading",
+                "icsi_statistical_observation",
+                "paper_split_rate_models",
                 "receiver_consistent_cross_interference",
             ],
         )
         self.assertNotIn("selected_hypothesis", plan)
         self.assertEqual(plan["result_selection"], "none_report_all")
 
-    def test_full_factorial_plan_has_all_256_unique_combinations(self):
+    def test_full_factorial_plan_has_all_1536_unique_combinations(self):
         plan = build_sensitivity_plan("full_factorial")
         combinations = {
             tuple(sorted(scenario["hypotheses"].items()))
             for scenario in plan["scenarios"]
         }
-        self.assertEqual(len(plan["scenarios"]), 256)
-        self.assertEqual(len(combinations), 256)
+        self.assertEqual(len(plan["scenarios"]), 1536)
+        self.assertEqual(len(combinations), 1536)
 
     def test_unknown_design_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Unknown sensitivity design"):
@@ -67,18 +70,26 @@ class AmbiguityProtocolTests(unittest.TestCase):
                 primary.ddpg_comparator_csi_hypothesis_id,
             "los_probability": primary.los_probability_hypothesis_id,
             "channel_coherence": primary.channel_coherence_hypothesis_id,
+            "csi_observation": primary.csi_observation_hypothesis_id,
+            "rate_model": primary.rate_model_hypothesis_id,
             "cross_function_interference":
                 primary.cross_function_interference_hypothesis_id,
         })
         alternatives = [
             {"transfer_update_hypothesis_id":
-             "eq30_next_state_continuation_blend"},
+             "eq30_literal_current_q_blend"},
+            {"transfer_update_hypothesis_id":
+             "eq30_current_q_bellman_blend"},
             {"transfer_schedule_hypothesis_id": "linear_annealed_upsilon"},
             {"wfb_hypothesis_id": "channel_independent_dft_no_capon"},
             {"ddpg_comparator_csi_hypothesis_id": "icsi_comparator"},
             {"los_probability_hypothesis_id":
              "al_hourani_standard_mapped_roles"},
             {"channel_coherence_hypothesis_id": "episode_block_fading"},
+            {"csi_observation_hypothesis_id":
+             "pcsi_instantaneous_icsi_statistical"},
+            {"rate_model_hypothesis_id":
+             "paper_split_scalar_pcsi_matrix_icsi"},
             {"cross_function_interference_hypothesis_id":
              "receiver_consistent_cross_channels"},
         ]
@@ -96,6 +107,9 @@ class AmbiguityProtocolTests(unittest.TestCase):
                         candidate.los_probability_hypothesis_id,
                     "channel_coherence":
                         candidate.channel_coherence_hypothesis_id,
+                    "csi_observation":
+                        candidate.csi_observation_hypothesis_id,
+                    "rate_model": candidate.rate_model_hypothesis_id,
                     "cross_function_interference":
                         candidate.cross_function_interference_hypothesis_id,
                 })
@@ -112,7 +126,7 @@ class AmbiguityProtocolTests(unittest.TestCase):
             "description_literal_target_matches_ue",
         )
         self.assertEqual(
-            manifest["dtl_transfer_mode"], "eq30_current_q_bellman_blend"
+            manifest["dtl_transfer_mode"], "eq30_next_state_continuation_blend"
         )
         self.assertEqual(
             manifest["dtl_transfer_schedule_id"], "constant_upsilon"
@@ -127,11 +141,19 @@ class AmbiguityProtocolTests(unittest.TestCase):
         )
         self.assertEqual(
             manifest["los_probability_hypothesis_id"],
-            "paper_eq6_literal_roles",
+            "paper_unnumbered_los_literal_roles",
         )
         self.assertEqual(
             manifest["channel_coherence_hypothesis_id"],
             "independent_slot_fading",
+        )
+        self.assertEqual(
+            manifest["csi_observation_hypothesis_id"],
+            "instantaneous_estimates_all_csi_qualities",
+        )
+        self.assertEqual(
+            manifest["rate_model_hypothesis_id"],
+            "continuous_matrix_scee_all_csi_qualities",
         )
         self.assertEqual(
             manifest["cross_function_interference_hypothesis_id"],
@@ -165,6 +187,9 @@ class AmbiguityProtocolTests(unittest.TestCase):
                     hypotheses["los_probability"],
                 "channel_coherence_hypothesis_id":
                     hypotheses["channel_coherence"],
+                "csi_observation_hypothesis_id":
+                    hypotheses["csi_observation"],
+                "rate_model_hypothesis_id": hypotheses["rate_model"],
                 "cross_function_interference_hypothesis_id":
                     hypotheses["cross_function_interference"],
                 "final_reward_by_method": {
@@ -210,6 +235,10 @@ class AmbiguityProtocolTests(unittest.TestCase):
                     scenario["hypotheses"]["los_probability"],
                 "channel_coherence_hypothesis_id":
                     scenario["hypotheses"]["channel_coherence"],
+                "csi_observation_hypothesis_id":
+                    scenario["hypotheses"]["csi_observation"],
+                "rate_model_hypothesis_id":
+                    scenario["hypotheses"]["rate_model"],
                 "cross_function_interference_hypothesis_id":
                     scenario["hypotheses"]["cross_function_interference"],
                 "final_reward_by_method": {},
@@ -248,13 +277,16 @@ class AmbiguityProtocolTests(unittest.TestCase):
                     hypotheses["los_probability"],
                 "channel_coherence_hypothesis_id":
                     hypotheses["channel_coherence"],
+                "csi_observation_hypothesis_id":
+                    hypotheses["csi_observation"],
+                "rate_model_hypothesis_id": hypotheses["rate_model"],
                 "cross_function_interference_hypothesis_id":
                     hypotheses["cross_function_interference"],
                 "final_reward_by_method": {},
                 "communication_seed_values": [1] * 5,
                 "sensing_seed_values": [1] * 5,
             }
-        summaries["transfer_next_state"]["source_tree_digest"] = "b" * 64
+        summaries["transfer_literal_current_q"]["source_tree_digest"] = "b" * 64
         with self.assertRaisesRegex(ValueError, "paired provenance"):
             build_sensitivity_report(plan, summaries)
 
@@ -284,6 +316,9 @@ class AmbiguityProtocolTests(unittest.TestCase):
                     hypotheses["los_probability"],
                 "channel_coherence_hypothesis_id":
                     hypotheses["channel_coherence"],
+                "csi_observation_hypothesis_id":
+                    hypotheses["csi_observation"],
+                "rate_model_hypothesis_id": hypotheses["rate_model"],
                 "cross_function_interference_hypothesis_id":
                     hypotheses["cross_function_interference"],
                 "final_reward_by_method": {},
@@ -293,6 +328,24 @@ class AmbiguityProtocolTests(unittest.TestCase):
         summaries["noise_dual_minus70"]["noise_hypothesis_id"] = (
             "description_literal_target_matches_ue"
         )
+        with self.assertRaisesRegex(ValueError, "hypothesis identity"):
+            build_sensitivity_report(plan, summaries)
+
+        summaries["icsi_statistical_observation"][
+            "csi_observation_hypothesis_id"
+        ] = "instantaneous_estimates_all_csi_qualities"
+        summaries["paper_split_rate_models"]["rate_model_hypothesis_id"] = (
+            "continuous_matrix_scee_all_csi_qualities"
+        )
+        with self.assertRaisesRegex(ValueError, "hypothesis identity"):
+            build_sensitivity_report(plan, summaries)
+
+        summaries["noise_dual_minus70"]["noise_hypothesis_id"] = (
+            "dual_minus70_conservative"
+        )
+        summaries["icsi_statistical_observation"][
+            "csi_observation_hypothesis_id"
+        ] = "pcsi_instantaneous_icsi_statistical"
         with self.assertRaisesRegex(ValueError, "hypothesis identity"):
             build_sensitivity_report(plan, summaries)
 
@@ -314,12 +367,17 @@ class AmbiguityProtocolTests(unittest.TestCase):
             "episodes": 1500,
             "evaluation_episodes": 5,
             "noise_hypothesis_id": "description_literal_target_matches_ue",
-            "dtl_transfer_mode": "eq30_current_q_bellman_blend",
+            "dtl_transfer_mode": "eq30_next_state_continuation_blend",
             "dtl_transfer_schedule_id": "constant_upsilon",
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
-            "los_probability_hypothesis_id": "paper_eq6_literal_roles",
+            "los_probability_hypothesis_id":
+                "paper_unnumbered_los_literal_roles",
             "channel_coherence_hypothesis_id": "independent_slot_fading",
+            "csi_observation_hypothesis_id":
+                "instantaneous_estimates_all_csi_qualities",
+            "rate_model_hypothesis_id":
+                "continuous_matrix_scee_all_csi_qualities",
             "cross_function_interference_hypothesis_id":
                 "paper_eq12_eq14_literal_cross_channels",
         }
@@ -345,9 +403,16 @@ class AmbiguityProtocolTests(unittest.TestCase):
             with patch("run_baseline.run", return_value=0) as mocked, patch(
                 "parameter_profiles.load_calibrated_profile",
                 return_value=SimpleNamespace(digest="profile"),
-            ), patch("source_integrity.source_tree_digest", return_value="a" * 64):
+            ), patch(
+                "source_integrity.source_tree_digest", return_value="a" * 64
+            ), patch(
+                "validate_results.require_canonical_baseline_validation"
+            ) as canonical:
                 run_sensitivity(args)
-            self.assertEqual(mocked.call_count, 8)
+                canonical.assert_called_once_with(
+                    baseline, validation, baseline_path.resolve().parent
+                )
+            self.assertEqual(mocked.call_count, 11)
 
     def test_external_primary_mismatch_fails_before_sensitivity_training(self):
         primary = {
@@ -363,8 +428,13 @@ class AmbiguityProtocolTests(unittest.TestCase):
             "dtl_transfer_schedule_id": "constant_upsilon",
             "wfb_hypothesis_id": "adaptive_matched_filter_no_capon",
             "ddpg_comparator_csi_hypothesis_id": "fair_pcsi_comparator",
-            "los_probability_hypothesis_id": "paper_eq6_literal_roles",
+            "los_probability_hypothesis_id":
+                "paper_unnumbered_los_literal_roles",
             "channel_coherence_hypothesis_id": "independent_slot_fading",
+            "csi_observation_hypothesis_id":
+                "pcsi_instantaneous_icsi_statistical",
+            "rate_model_hypothesis_id":
+                "continuous_matrix_scee_all_csi_qualities",
             "cross_function_interference_hypothesis_id":
                 "paper_eq12_eq14_literal_cross_channels",
         }
@@ -377,6 +447,70 @@ class AmbiguityProtocolTests(unittest.TestCase):
                 episodes=1500,
                 evaluation_episodes=5,
             )
+
+    def test_cached_sensitivity_summary_with_stale_source_is_rejected(self):
+        plan = build_sensitivity_plan("one_at_a_time")
+        plan = {**plan, "scenarios": [plan["scenarios"][0]]}
+        scenario = plan["scenarios"][0]
+        summary = {
+            "kind": "generated_result",
+            "protocol": "paper_baseline",
+            "profile_digest": "profile",
+            "source_tree_digest": "b" * 64,
+            "seeds": [1, 2, 3, 4, 5],
+            "episodes": 1500,
+            "evaluation_episodes": 5,
+            "noise_hypothesis_id": scenario["hypotheses"]["noise"],
+            "dtl_transfer_mode": scenario["hypotheses"]["transfer_update"],
+            "dtl_transfer_schedule_id": scenario["hypotheses"][
+                "transfer_schedule"
+            ],
+            "wfb_hypothesis_id": scenario["hypotheses"]["wfb"],
+            "ddpg_comparator_csi_hypothesis_id": scenario["hypotheses"][
+                "ddpg_comparator_csi"
+            ],
+            "los_probability_hypothesis_id": scenario["hypotheses"][
+                "los_probability"
+            ],
+            "channel_coherence_hypothesis_id": scenario["hypotheses"][
+                "channel_coherence"
+            ],
+            "csi_observation_hypothesis_id": scenario["hypotheses"][
+                "csi_observation"
+            ],
+            "rate_model_hypothesis_id": scenario["hypotheses"]["rate_model"],
+            "cross_function_interference_hypothesis_id": scenario[
+                "hypotheses"
+            ]["cross_function_interference"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scenario_root = root / scenario["id"]
+            scenario_root.mkdir()
+            (scenario_root / "baseline_summary.json").write_text(
+                json.dumps(summary), encoding="utf-8"
+            )
+            args = sensitivity_parser().parse_args([
+                "--profile", "profile.json",
+                "--output-root", str(root),
+                "--seeds", "1,2,3,4,5",
+            ])
+            with patch(
+                "run_ambiguity_sensitivity.build_sensitivity_plan",
+                return_value=plan,
+            ), patch(
+                "parameter_profiles.load_calibrated_profile",
+                return_value=SimpleNamespace(digest="profile"),
+            ), patch(
+                "source_integrity.source_tree_digest", return_value="a" * 64
+            ), patch(
+                "run_baseline.run", return_value=0
+            ), patch(
+                "run_ambiguity_sensitivity.build_sensitivity_report",
+                return_value={},
+            ):
+                with self.assertRaisesRegex(ValueError, "cached sensitivity"):
+                    run_sensitivity(args)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 import hashlib
 from pathlib import Path
+from typing import Mapping
 
 import torch
 
@@ -31,6 +32,27 @@ def source_model_digest(agent) -> str:
     return digest.hexdigest()
 
 
+def source_model_state_digest(agent_state: Mapping) -> str:
+    """Hash source-network state serialized inside a training checkpoint."""
+    if not isinstance(agent_state, Mapping):
+        raise ValueError("Serialized source agent state must be a mapping.")
+    digest = hashlib.sha256()
+    for module_name in ("actor", "critic", "actor_tgt", "critic_tgt"):
+        module_state = agent_state.get(module_name)
+        if not isinstance(module_state, Mapping) or not module_state:
+            raise ValueError(
+                f"Serialized source agent has no {module_name} network state."
+            )
+        digest.update(module_name.encode("ascii"))
+        for key, value in sorted(module_state.items()):
+            if not torch.is_tensor(value):
+                raise ValueError(
+                    f"Serialized source network entry {key!r} is not a tensor."
+                )
+            _update_tensor(digest, key, value)
+    return digest.hexdigest()
+
+
 def policy_model_digest(module) -> str:
     """Hash one policy module independently of optimizer or replay state."""
     if not hasattr(module, "state_dict"):
@@ -52,7 +74,13 @@ def source_tree_digest(root=None) -> str:
     root = Path(root or ROOT).resolve()
     if not root.is_dir():
         raise ValueError(f"Source root is not a directory: {root}")
-    paths = sorted(root.glob("*.py"), key=lambda path: path.name)
+    paths = sorted(
+        (
+            path for path in root.glob("*.py")
+            if not path.name.startswith("test_")
+        ),
+        key=lambda path: path.name,
+    )
     requirements = root / "requirements.txt"
     if requirements.is_file():
         paths.append(requirements)

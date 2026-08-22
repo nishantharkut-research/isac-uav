@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from checkpointing import (
+    inspect_training_checkpoint,
     load_training_checkpoint,
     save_training_checkpoint,
     validate_training_histories,
@@ -20,9 +21,14 @@ from experiment_protocol import derive_training_seed
 from simulation import (
     _configuration_fingerprint,
     _training_identity,
+    exploration_noise_for_episode,
     set_reproducibility,
 )
-from source_integrity import source_model_digest, source_tree_digest
+from source_integrity import (
+    source_model_digest,
+    source_model_state_digest,
+    source_tree_digest,
+)
 
 
 class _DummyEnvironment:
@@ -127,6 +133,45 @@ class CheckpointResumeTests(unittest.TestCase):
                     expected_identity={"run_id": "extension"},
                 )
 
+    def test_structured_identity_mismatch_is_rejected_before_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "latest.pt"
+            agent = self._agent()
+            identity = {"run_id": "baseline"}
+            save_training_checkpoint(
+                path, agent, _DummyEnvironment(), 1, {}, identity
+            )
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            payload["identity"] = {"run_id": "relabelled"}
+            torch.save(payload, path)
+
+            with self.assertRaisesRegex(ValueError, "identity mismatch"):
+                load_training_checkpoint(
+                    path, agent, _DummyEnvironment(), identity
+                )
+
+    def test_checkpoint_inspection_binds_internal_identity_and_histories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "authority.pt"
+            identity = {"run_id": "authority", "requested_episode_target": 2}
+            histories = {"rewards": [1.0, 2.0]}
+            save_training_checkpoint(
+                path, self._agent(), _DummyEnvironment(), 2,
+                histories, identity,
+            )
+
+            inspected = inspect_training_checkpoint(path)
+
+            self.assertEqual(inspected["identity"], identity)
+            self.assertEqual(inspected["completed_episode"], 2)
+            self.assertEqual(inspected["histories"], histories)
+
+            payload = torch.load(path, map_location="cpu", weights_only=False)
+            payload["identity"] = {"run_id": "relabelled"}
+            torch.save(payload, path)
+            with self.assertRaisesRegex(ValueError, "canonical identity"):
+                inspect_training_checkpoint(path)
+
     def test_failed_atomic_write_keeps_previous_checkpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "latest.pt"
@@ -222,7 +267,7 @@ class CheckpointResumeTests(unittest.TestCase):
         )
         self.assertEqual(
             identity["dtl_transfer_mode"],
-            "eq30_current_q_bellman_blend",
+            "eq30_next_state_continuation_blend",
         )
         self.assertEqual(identity["dtl_transfer_schedule_id"], "constant_upsilon")
         self.assertEqual(
@@ -245,6 +290,10 @@ class CheckpointResumeTests(unittest.TestCase):
     def test_source_model_digest_changes_when_source_weights_change(self):
         source = DDPGAgent(3, 2)
         before = source_model_digest(source)
+        self.assertEqual(
+            before,
+            source_model_state_digest(source.training_state_dict()),
+        )
         with torch.no_grad():
             next(source.actor.parameters()).add_(1.0)
         self.assertNotEqual(before, source_model_digest(source))
@@ -258,6 +307,16 @@ class CheckpointResumeTests(unittest.TestCase):
             source.write_text("VALUE = 2\n", encoding="utf-8")
             self.assertNotEqual(before, source_tree_digest(root))
 
+    def test_source_tree_digest_excludes_root_level_test_modules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "model.py").write_text("VALUE = 1\n", encoding="utf-8")
+            test_module = root / "test_model.py"
+            test_module.write_text("def test_value(): pass\n", encoding="utf-8")
+            before = source_tree_digest(root)
+            test_module.write_text("def test_value(): assert False\n", encoding="utf-8")
+            self.assertEqual(before, source_tree_digest(root))
+
     def test_configuration_fingerprint_covers_distinct_noise_terms_and_power_id(self):
         baseline = _configuration_fingerprint()
         with patch.object(cfg, "sigma2_k", cfg.sigma2_k * 2.0):
@@ -265,7 +324,7 @@ class CheckpointResumeTests(unittest.TestCase):
         with patch.object(cfg, "power_hypothesis_id", "paper_db_as_dbw"):
             self.assertNotEqual(baseline, _configuration_fingerprint())
         with patch.object(
-            cfg, "dtl_transfer_mode", "eq30_next_state_continuation_blend"
+            cfg, "dtl_transfer_mode", "eq30_current_q_bellman_blend"
         ):
             self.assertNotEqual(baseline, _configuration_fingerprint())
         with patch.object(
@@ -280,6 +339,38 @@ class CheckpointResumeTests(unittest.TestCase):
             cfg, "ddpg_comparator_csi_hypothesis_id", "icsi_comparator"
         ):
             self.assertNotEqual(baseline, _configuration_fingerprint())
+
+    def test_configuration_fingerprint_covers_training_hyperparameters(self):
+        baseline = _configuration_fingerprint()
+        for field, value in (
+            ("B_batch", cfg.B_batch + 1),
+            ("lr_actor", cfg.lr_actor * 2.0),
+            ("lr_critic", cfg.lr_critic * 2.0),
+            ("gamma", cfg.gamma * 0.9),
+            ("tau", cfg.tau * 2.0),
+            ("replay_size", cfg.replay_size + 1),
+            ("noise_std", cfg.noise_std * 0.5),
+            ("noise_min", cfg.noise_min * 0.5),
+            ("noise_decay", cfg.noise_decay * 0.99),
+            ("upsilon_0", cfg.upsilon_0 * 0.5),
+            ("upsilon_min", cfg.upsilon_min * 0.5),
+            ("upsilon_decay", cfg.upsilon_decay * 2.0),
+        ):
+            with self.subTest(field=field), patch.object(cfg, field, value):
+                self.assertNotEqual(baseline, _configuration_fingerprint())
+
+    def test_exploration_noise_is_defined_before_each_episode(self):
+        self.assertEqual(exploration_noise_for_episode(1), cfg.noise_std)
+        self.assertAlmostEqual(
+            exploration_noise_for_episode(2),
+            max(cfg.noise_min, cfg.noise_std * cfg.noise_decay),
+        )
+        late_episode = 1_000_000
+        self.assertEqual(
+            exploration_noise_for_episode(late_episode), cfg.noise_min
+        )
+        with self.assertRaisesRegex(ValueError, "episode"):
+            exploration_noise_for_episode(0)
 
     def test_reproducibility_enables_deterministic_torch_backends(self):
         set_reproducibility(2025)

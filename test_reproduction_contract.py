@@ -530,7 +530,7 @@ def test_fig6_uses_configured_training_and_ao_budgets():
     assert 'ax.set_xlabel("P_T (dB)")' in source
     assert "TrainingRegistry" in source
     assert "get_or_train" in source
-    assert "fix_uav=False" in source
+    assert "fix_uav=True" in source
     assert "temporary_system_configuration" in source
     assert "cfg.L   = 20" not in source
 
@@ -666,7 +666,7 @@ def test_environment_keeps_paper_action_space_without_ao_inside_drl_step():
     step_source = inspect.getsource(environment.HRISUAVISACEnv.step)
     assert "solve_beamformer" not in step_source
     evaluation_source = inspect.getsource(
-        environment.HRISUAVISACEnv._evaluate_controls
+        environment.HRISUAVISACEnv._allocate_current_channel
     )
     assert "select_feasible_beamformers" in evaluation_source
 
@@ -703,14 +703,22 @@ def test_environment_step_reports_feasible_power_split_metadata():
          cfg.N_slots, cfg.sca_max_iter) = saved
 
 
-def test_state_contains_precoders_and_full_composite_channel_matrices():
+def test_state_contains_precoders_and_estimated_primitive_channel_matrices():
     from environment import HRISUAVISACEnv
 
     env = HRISUAVISACEnv(sigma2_scee=0.0, seed=405)
     expected = (
         2 * cfg.Lp + 2 * cfg.La + 3
+        + 1
+        + 2 * (cfg.U + cfg.K)
+        + 2 * cfg.K
         + 2 * cfg.M * (cfg.U + cfg.K)
-        + 2 * cfg.N * cfg.M * (cfg.U + cfg.K)
+        + 1  # absolute primitive-channel scale
+        + 2 * (
+            cfg.L * cfg.M
+            + cfg.U * cfg.N * (cfg.Lp + cfg.M)
+            + cfg.K * cfg.N * (cfg.La + cfg.M)
+        )
     )
     assert env.state_dim == expected
     state = env.reset()
@@ -818,6 +826,20 @@ def test_fig11_uses_scene_target_geometry_not_nominal_angles():
     assert "pos_tes" in source
     assert "np.radians(30)" not in source
     assert "np.radians(45)" not in source
+    assert "active_hris_steering" in source
+    assert "cfg.Lax" not in source
+    assert "cfg.Lay" not in source
+
+
+def test_fig11_icsi_pattern_is_loaded_from_estimated_channel_realization():
+    import simulation
+
+    source = inspect.getsource(simulation.fig11_beampattern)
+    assert "ChannelSet(" in source
+    assert "H_rt_hat" in source
+    assert "G_bri_hat" in source
+    assert "sv_rti" in source and "sv_bri" in source
+    assert "cfg.rho_nmse * np.eye" not in source
 
 
 def test_fig11_uses_the_published_azimuth_and_elevation_domain():
@@ -835,7 +857,8 @@ def test_fig5_uses_paper_iterations_one_to_twenty_without_early_truncation():
 
     source = inspect.getsource(simulation.fig5_ao_convergence)
     assert "stop_on_convergence=False" in source
-    assert "fix_uav=False" in source
+    assert "fix_uav=True" in source
+    assert '"terminal_iterate_reported": True' in source
     assert "_temporary_hris_configuration" in source
     assert "history_sum_rate\"][1:cfg.ao_max_iter + 1]" in source
     assert "range(1, cfg.ao_max_iter + 1)" in source

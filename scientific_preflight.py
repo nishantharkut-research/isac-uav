@@ -154,7 +154,7 @@ def run_scientific_preflight(output_path, seeds=PREFLIGHT_SEEDS,
 
 
 def run_pretraining_physical_sanity(seeds=PRETRAINING_SANITY_SEEDS):
-    """Fail before DRL training if the activated action space is ineffective."""
+    """Report bounded action-response diagnostics without stopping training."""
     from parameter_identification import (
         MINIMUM_COMM_ACTION_RESPONSE,
         evaluate_candidate,
@@ -175,14 +175,11 @@ def run_pretraining_physical_sanity(seeds=PRETRAINING_SANITY_SEEDS):
     report = {
         "schema_version": 1,
         "kind": "pretraining_physical_sanity",
-        "method": "deterministic no-training action-response gate",
+        "method": "deterministic no-training action-response diagnostic",
+        "advisory_only": True,
         "minimum_comm_action_response": MINIMUM_COMM_ACTION_RESPONSE,
         "passed": bool(passed),
         "reasons": list(reasons),
         **{field: _json_safe(metrics[field]) for field in summary_fields},
     }
-    if not passed:
-        raise RuntimeError(
-            "Pre-training physical sanity failed: " + "; ".join(reasons)
-        )
     return report

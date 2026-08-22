@@ -7,6 +7,7 @@ from pareto_protocol import (
     ParetoAnchors,
     holm_adjust,
     hypervolume_2d,
+    normalized_physical_zero_reference,
     nondominated_mask,
     paired_confidence_interval,
     scalarize_returns,
@@ -117,6 +118,15 @@ class ParetoAndStatisticsTests(unittest.TestCase):
             hypervolume_2d([[1.0, np.nan]], [0.0, 0.0])
         with self.assertRaisesRegex(ValueError, "reference"):
             hypervolume_2d([[-1.0, 1.0]], [0.0, 0.0])
+
+    def test_hypervolume_reference_is_below_all_nonnegative_physical_rates(self):
+        anchors = ParetoAnchors()
+        anchors.update_training([[2.0, 4.0], [6.0, 10.0]])
+        anchors.freeze()
+        reference = normalized_physical_zero_reference(anchors, margin=0.05)
+        feasible = anchors.normalize([[0.0, 0.0], [1.0, 3.0], [8.0, 12.0]])
+        self.assertTrue(np.all(feasible > reference))
+        self.assertGreaterEqual(hypervolume_2d(feasible, reference), 0.0)
 
     def test_paired_interval_and_holm_adjustment(self):
         candidate = np.array([2.0, 3.0, 4.0, 5.0])

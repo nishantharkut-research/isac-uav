@@ -2,9 +2,15 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from experiment_protocol import ensure_run_directory, make_run_manifest, parse_seeds
-from run_baseline import build_parser as baseline_parser
+from run_baseline import build_parser as baseline_parser, parse_run_seeds
+import run_pareto_extension
+from plot_baseline import main as plot_baseline
+from plot_holdouts import main as plot_holdouts
+from validate_pareto_extension import main as validate_pareto_cli
+from validate_results import main as validate_results_cli
 from run_extension import (
     build_extension_objective_manifest,
     build_parser as extension_parser,
@@ -21,6 +27,92 @@ class EntrypointContractTests(unittest.TestCase):
             parse_seeds("1,2,3,4")
         with self.assertRaisesRegex(ValueError, "unique"):
             parse_seeds("1,1,2,3,4")
+
+    def test_smoke_mode_is_separate_and_allows_a_small_seed_set(self):
+        self.assertEqual(parse_run_seeds("7", "smoke"), (7,))
+        with self.assertRaisesRegex(ValueError, "at least five"):
+            parse_run_seeds("7", "publication")
+        smoke = baseline_parser().parse_args([
+            "--profile", "profile.json", "--output", "out",
+            "--seeds", "7", "--run-mode", "smoke", "--episodes", "100",
+            "--dry-run",
+        ])
+        self.assertEqual(smoke.run_mode, "smoke")
+        self.assertEqual(smoke.episodes, 100)
+
+    def test_pareto_runner_exposes_canonical_baseline_revalidation(self):
+        self.assertTrue(callable(
+            run_pareto_extension.require_canonical_baseline_validation
+        ))
+
+    def test_rejected_results_are_not_rendered_as_publication_figures(self):
+        reference = (
+            Path(__file__).parents[1]
+            / "references"
+            / "paper_reference_curves.json"
+        )
+        for plotter, validator in (
+            (plot_baseline, "plot_baseline.validate_baseline_result"),
+            (plot_holdouts, "plot_holdouts.validate_holdout_result"),
+        ):
+            with self.subTest(plotter=plotter.__module__), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                summary = root / "summary.json"
+                output = root / "figures"
+                summary.write_text("{}", encoding="utf-8")
+                with patch(validator, return_value={"overall_pass": False}):
+                    with self.assertRaisesRegex(ValueError, "failed validation"):
+                        plotter([
+                            "--summary" if plotter is plot_holdouts else "--baseline-summary",
+                            str(summary),
+                            "--reference", str(reference),
+                            "--output", str(output),
+                        ])
+                self.assertFalse(output.exists())
+
+    def test_standalone_extension_validators_recompute_baseline_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = {}
+            for name in ("baseline.json", "validation.json", "extension.json"):
+                path = root / name
+                path.write_text("{}", encoding="utf-8")
+                inputs[name] = path
+
+            with patch(
+                "validate_results.require_canonical_baseline_validation"
+            ) as canonical, patch(
+                "validate_results.validate_extension_result",
+                return_value={"overall_pass": True},
+            ):
+                result = validate_results_cli([
+                    "--baseline", str(inputs["baseline.json"]),
+                    "--reference", str(inputs["validation.json"]),
+                    "--extension", str(inputs["extension.json"]),
+                    "--baseline-validation", str(inputs["validation.json"]),
+                    "--output", str(root / "extension-report.json"),
+                ])
+                self.assertEqual(result, 0)
+                canonical.assert_called_once_with(
+                    {}, {}, inputs["baseline.json"].resolve().parent
+                )
+
+            with patch(
+                "validate_pareto_extension.require_canonical_baseline_validation"
+            ) as canonical, patch(
+                "validate_pareto_extension.validate_pareto_result",
+                return_value={"overall_pass": True},
+            ):
+                result = validate_pareto_cli([
+                    "--summary", str(inputs["extension.json"]),
+                    "--baseline-summary", str(inputs["baseline.json"]),
+                    "--baseline-validation", str(inputs["validation.json"]),
+                    "--output", str(root / "pareto-report.json"),
+                ])
+                self.assertEqual(result, 0)
+                canonical.assert_called_once_with(
+                    {}, {}, inputs["baseline.json"].resolve().parent
+                )
 
     def test_output_manifest_rejects_mismatched_run(self):
         first = make_run_manifest(

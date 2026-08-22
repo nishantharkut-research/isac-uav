@@ -1,21 +1,22 @@
 """
-ao_optimizer.py — Alternating Optimisation (AO) baseline.
+ao_optimizer.py — constrained SciPy AO surrogate baseline.
 
 Section V of Saikia et al., IEEE Trans. Commun., 2025.
 
-Numerical approximation of the three blocks in Algorithms 2 and 3. The paper
-does not publish its CVX implementation or all auxiliary matrices, so this file
-uses SciPy with the published objective and constraints rather than claiming to
-be the unavailable author solver.
+This is not Algorithms 2-3: the paper omits executable target-MMSE, active-HRIS,
+and full-trajectory SCA details. The surrogate constructs fixed ZF/matched-filter
+beam directions, optimizes stream powers and HRIS controls with constrained
+SciPy searches, and keeps geometry fixed for paper-comparison curves.
 
-SCA convergence is declared when the fractional increase of the objective
-falls below δ = cfg.ao_tol.
+Surrogate convergence is declared when absolute relative objective change falls
+below the disclosed numerical tolerance cfg.ao_tol.
 """
 from config import cfg
 import numpy as np
 
 from channel_model import ChannelSet
 from paper_contract import (
+    CALIBRATION_SOLVER_SCOPE,
     active_power_penalty,
     cascade_penalty_16c,
     communication_sum_rate,
@@ -62,7 +63,7 @@ def _constraint_diagnostics(ch: ChannelSet,
 
     _, cascade_ok, cascade_power = cascade_penalty_16c(
         ch, theta, cfg.Psi_max)
-    p_ai = active_tx_power(ch, T, phi)
+    p_ai = active_tx_power(ch, C, T, phi)
     _, active_ok = active_power_penalty(p_ai, cfg.P_a_max)
 
     total_power = float(
@@ -98,7 +99,7 @@ def _constraint_diagnostics(ch: ChannelSet,
 def optimize_power_split(ch: ChannelSet,
                          theta: np.ndarray,
                          phi: np.ndarray,
-                         use_capon: bool = True,
+                         use_capon: bool = False,
                          sensing_rate_min: float = None) -> tuple:
     """Optimize all U+K stream powers for the paper objective with SLSQP."""
     threshold = cfg.R_min if sensing_rate_min is None else sensing_rate_min
@@ -122,16 +123,16 @@ def optimize_power_split(ch: ChannelSet,
 
 
 
-# ─── Sub-problem P2a1: Transmit Beamformer ────────────────────────────────────
+# ─── Surrogate block: fixed directions and stream-power allocation ───────────
 
 def solve_beamformer(ch: ChannelSet,
                      theta: np.ndarray,
                      phi:   np.ndarray,
                      sensing_rate_min: float = None,
                      return_info: bool = False,
-                     use_capon: bool = True) -> tuple:
+                     use_capon: bool = False) -> tuple:
     """
-    Numerical transmit-beamformer block initialized by ZF and Capon.
+    Construct ZF/matched-filter directions and optimize their stream powers.
 
     Returns: C (M,U), T (M,K)
     """
@@ -154,17 +155,19 @@ def solve_beamformer(ch: ChannelSet,
     return C, T
 
 
-# ─── Sub-problem P2b1: HRIS Phase Shifts (SCA) ────────────────────────────────
+# ─── Surrogate block: direct constrained HRIS control search ─────────────────
 
 def _scee_phase_objective(beta_vec: np.ndarray,
                           ch:    ChannelSet,
                           C:     np.ndarray,
                           T:     np.ndarray,
-                          is_passive: bool) -> float:
+                          is_passive: bool,
+                          theta_fixed: np.ndarray,
+                          phi_fixed: np.ndarray) -> float:
     """Return the negative raw communication objective for SciPy."""
     if is_passive:
         theta = np.exp(1j * beta_vec)
-        phi   = _current_phi
+        phi = phi_fixed
         rate_u, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
         return -communication_sum_rate(rate_u)
     else:
@@ -173,19 +176,20 @@ def _scee_phase_objective(beta_vec: np.ndarray,
         alpha = np.exp(beta_vec[La:]) * cfg.alpha_max   # reparameterise α > 0
         alpha = np.clip(alpha, 0, cfg.alpha_max)
         phi   = alpha * np.exp(1j * phi_p)
-        theta = _current_theta
+        theta = theta_fixed
         rate_u, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
         return -communication_sum_rate(rate_u)
 
 
-def _phase_constraint_values(beta_vec, ch, C, T, is_passive):
+def _phase_constraint_values(beta_vec, ch, C, T, is_passive,
+                             theta_fixed, phi_fixed, sensing_rate_min):
     """Return Eq. (16) margins; nonnegative means physically feasible."""
     if is_passive:
         theta = np.exp(1j * beta_vec)
-        phi = _current_phi
+        phi = phi_fixed
     else:
         active_count = cfg.La
-        theta = _current_theta
+        theta = theta_fixed
         alpha = np.clip(
             np.exp(beta_vec[active_count:]) * cfg.alpha_max,
             0.0,
@@ -193,9 +197,11 @@ def _phase_constraint_values(beta_vec, ch, C, T, is_passive):
         )
         phi = alpha * np.exp(1j * beta_vec[:active_count])
     _, rate_k, _, _ = compute_rates(ch, theta, phi, C, T)
-    threshold = globals().get("_current_sensing_rate_min", cfg.R_min)
+    threshold = (
+        cfg.R_min if sensing_rate_min is None else float(sensing_rate_min)
+    )
     _, _, cascade_power = cascade_penalty_16c(ch, theta, cfg.Psi_max)
-    active_power = active_tx_power(ch, T, phi)
+    active_power = active_tx_power(ch, C, T, phi)
     return np.concatenate([
         np.asarray(rate_k, dtype=float) - float(threshold),
         np.array([
@@ -204,19 +210,6 @@ def _phase_constraint_values(beta_vec, ch, C, T, is_passive):
         ]),
     ])
 
-
-def _phase_gradient(beta_vec: np.ndarray, ch, C, T, is_passive: bool,
-                    eps: float = 1e-4) -> np.ndarray:
-    """Numerical gradient via central differences (SCA surrogate gradient)."""
-    grad = np.zeros_like(beta_vec)
-    f0   = _scee_phase_objective(beta_vec, ch, C, T, is_passive)
-    for i in range(len(beta_vec)):
-        dv      = beta_vec.copy()
-        dv[i]  += eps
-        grad[i] = (_scee_phase_objective(dv, ch, C, T, is_passive) - f0) / eps
-    return grad
-
-
 def solve_passive_phases(ch:    ChannelSet,
                          theta: np.ndarray,
                          C:     np.ndarray,
@@ -224,31 +217,26 @@ def solve_passive_phases(ch:    ChannelSet,
                          phi:   np.ndarray,
                          sensing_rate_min: float = None) -> np.ndarray:
     """
-    P2b1 for passive elements: SCA (Taylor expansion around θ^r, Eq. 43-44).
+    Direct constrained SLSQP search over passive phase angles.
 
-    Updates: θ^{r+1}_j = θ^r_j − ∇h(θ^r_j) / τ_r
-    Returns updated theta_phase (Lp,).
+    This is a researcher-defined surrogate, not Eqs. (38)-(44).
     """
-    global _current_phi, _current_sensing_rate_min
-    _current_phi = phi.copy()
-    _current_sensing_rate_min = cfg.R_min if sensing_rate_min is None else sensing_rate_min
-
     beta0  = np.angle(theta)           # initial passive phases
     result = _minimize(
         _scee_phase_objective,
         beta0,
-        args=(ch, C, T, True),
+        args=(ch, C, T, True, theta, phi),
         method='SLSQP',
         constraints=[{
             "type": "ineq",
             "fun": lambda beta: _phase_constraint_values(
-                beta, ch, C, T, True
+                beta, ch, C, T, True, theta, phi, sensing_rate_min
             ),
         }],
         options=dict(maxiter=cfg.sca_max_iter, ftol=cfg.ao_tol)
     )
     if result.success and np.min(_phase_constraint_values(
-        result.x, ch, C, T, True
+        result.x, ch, C, T, True, theta, phi, sensing_rate_min
     )) >= -1e-8:
         return result.x
     return beta0
@@ -261,18 +249,14 @@ def solve_active_phases(ch:    ChannelSet,
                         theta: np.ndarray,
                         sensing_rate_min: float = None) -> np.ndarray:
     """
-    P2b1 for active elements: joint optimisation of phase + amplification.
+    Direct constrained joint search over active phase and amplification.
 
-    Algorithm 3 objective: maximize R_u subject to the Eq. (16) constraints.
-    Sensing performance R_k comes from the Capon beamformer T;
+    The objective maximizes R_u subject to Eq. (16) constraints. Sensing
+    performance R_k comes from the fixed sensing directions in T;
     φ is jointly steered so amplification helps sensing without driving
     active noise (σ²_qa·Σ|φ_i|²) too high at UEs.
     Returns complex phi (La,) = α · exp(jβ^{ac}).
     """
-    global _current_theta, _current_sensing_rate_min
-    _current_theta = theta.copy()
-    _current_sensing_rate_min = cfg.R_min if sensing_rate_min is None else sensing_rate_min
-
     La    = cfg.La
     alpha = np.abs(phi)
     # Reparameterise: u = [β^{ac}_i | log(α_i / α_max)]
@@ -287,20 +271,22 @@ def solve_active_phases(ch:    ChannelSet,
     result = _minimize(
         _scee_phase_objective,
         u0,
-        args=(ch, C, T, False),
+        args=(ch, C, T, False, theta, phi),
         method='SLSQP',
         bounds=bounds,
         constraints=[{
             "type": "ineq",
             "fun": lambda beta: _phase_constraint_values(
-                beta, ch, C, T, False
+                beta, ch, C, T, False, theta, phi, sensing_rate_min
             ),
         }],
         options=dict(maxiter=cfg.sca_max_iter, ftol=cfg.ao_tol)
     )
     selected = result.x if (
         result.success
-        and np.min(_phase_constraint_values(result.x, ch, C, T, False)) >= -1e-8
+        and np.min(_phase_constraint_values(
+            result.x, ch, C, T, False, theta, phi, sensing_rate_min
+        )) >= -1e-8
     ) else u0
     phi_p = selected[:La]
     alpha_opt = np.exp(selected[La:]) * cfg.alpha_max
@@ -308,7 +294,7 @@ def solve_active_phases(ch:    ChannelSet,
     return alpha_opt * np.exp(1j * phi_p)
 
 
-# ─── Sub-problem P2c1: UAV Trajectory (SCA) ──────────────────────────────────
+# ─── Optional non-paper one-step geometry sensitivity ────────────────────────
 
 def _traj_objective(pos_xy: np.ndarray,
                     pos_ues: list, pos_tes: list, theta, phi, C, T,
@@ -341,7 +327,7 @@ def _trajectory_constraint_values(pos_xy, initial_xy, pos_ues, pos_tes,
     _, _, cascade_power = cascade_penalty_16c(
         channel, theta, cfg.Psi_max
     )
-    active_power = active_tx_power(channel, T, phi)
+    active_power = active_tx_power(channel, C, T, phi)
     transmit_power = float(
         np.linalg.norm(C, "fro") ** 2 + np.linalg.norm(T, "fro") ** 2
     )
@@ -370,7 +356,7 @@ def solve_uav_trajectory(pos_uav:  np.ndarray,
                          channel_seed: int = None,
                          sensing_rate_min: float = None) -> np.ndarray:
     """
-    P2c1: SCA-based UAV trajectory optimisation (Eq. 50-51, Algorithm 2).
+    Researcher-defined one-step geometry search, not paper Algorithm 2.
 
     Returns updated UAV [x, y] position for the next slot.
     The displacement is bounded by D_max = v_max · Δ_T  (Eq. 1-2).
@@ -421,27 +407,29 @@ def solve_uav_trajectory(pos_uav:  np.ndarray,
     return new_pos
 
 
-# ─── Algorithm 3: Full AO ─────────────────────────────────────────────────────
+# ─── Constrained fixed-geometry AO surrogate ─────────────────────────────────
 
 def run_ao(pos_uav:  np.ndarray,
            pos_ues:  list,
            pos_tes:  list,
            sigma2:   float = None,
            n_iter:   int   = cfg.ao_max_iter,
-           fix_uav:  bool  = False,
+           fix_uav:  bool  = True,
            sensing_rate_min: float = None,
            stop_on_convergence: bool = True,
            seed: int = None) -> dict:
     """
-    Algorithm 3: Alternating Optimisation.
+    Run the disclosed SciPy AO surrogate.
 
     Iterates:
-      1. Beamformer design  C, T           (P2a1)
-      2. HRIS phase shifts  θ_j, ϕ_i      (P2b1)
-      3. UAV trajectory     ι             (P2c1 — one step)
-    until convergence  (fractional Δ < δ).
+      1. construct fixed beam directions and optimize stream powers;
+      2. directly optimize passive and active HRIS controls with SLSQP.
 
-    Returns dict with final sum-rate, beamformers, and phase shifts.
+    Paper-comparison calls keep geometry fixed. ``fix_uav=False`` enables only
+    a disclosed one-step geometry sensitivity and is not Algorithms 2-3.
+
+    The reported solution is the terminal iterate. Best-feasible tracking is
+    diagnostic only and cannot optimistically replace that terminal result.
     """
     # ── Initialisation ────────────────────────────────────────────────────────
     rng = np.random.default_rng(seed)
@@ -459,8 +447,8 @@ def run_ao(pos_uav:  np.ndarray,
     history_sum_rate = []
     history_sensing_rate = []
     history_feasible = []
-    # Best-solution tracking uses the paper Eq. (16) communication objective,
-    # while histories keep communication and sensing rates separate for labels.
+    # Best-seen tracking is diagnostic only. Histories and the reported result
+    # use raw iterates and the terminal iterate respectively.
     best_objective = -np.inf
     best_state = None
     best_power_split = None
@@ -502,26 +490,26 @@ def run_ao(pos_uav:  np.ndarray,
     prev_objective = cur_objective
 
     for r in range(1, n_iter + 1):
-        # ── P2a1: Beamformer ──────────────────────────────────────────────────
+        # ── Fixed-direction beam and stream-power surrogate block ─────────────
         C, T, bf_info = solve_beamformer(
             ch, theta, phi,
             sensing_rate_min=sensing_rate_min,
             return_info=True,
         )
 
-        # ── P2b1a: Passive phase shifts ───────────────────────────────────────
+        # ── Direct passive phase search ───────────────────────────────────────
         beta_pas = solve_passive_phases(
             ch, theta, C, T, phi,
             sensing_rate_min=sensing_rate_min)
         theta    = np.exp(1j * beta_pas)
 
-        # ── P2b1b: Active phase shifts + amplification ────────────────────────
+        # ── Direct active phase/amplification search ──────────────────────────
         if cfg.La > 0:
             phi = solve_active_phases(
                 ch, phi, C, T, theta,
                 sensing_rate_min=sensing_rate_min)
 
-        # ── P2c1: UAV trajectory — skip when fix_uav=True (convergence plots) ──
+        # Optional one-step geometry sensitivity; never used for paper curves.
         if not fix_uav:
             pos = solve_uav_trajectory(
                 pos, pos_ues, pos_tes, theta, phi, C, T, sigma2,
@@ -558,44 +546,47 @@ def run_ao(pos_uav:  np.ndarray,
             )
 
         # Publication histories are raw numerical iterates. Best-feasible
-        # tracking is used only for the final returned solution and must not
-        # repair or force a monotone convergence curve.
+        # tracking must not repair the curve or replace the terminal result.
         history_objective.append(cur_objective)
         history_sum_rate.append(cur_sum_rate)
         history_sensing_rate.append(cur_sensing_rate)
         history_feasible.append(cur_feasible)
 
-        frac_inc = abs(cur_objective - prev_objective) / (abs(prev_objective) + 1e-12)
-        if stop_on_convergence and frac_inc < cfg.ao_tol:
+        relative_change = abs(cur_objective - prev_objective) / (
+            abs(prev_objective) + 1e-12
+        )
+        if stop_on_convergence and relative_change < cfg.ao_tol:
             break
         prev_objective = cur_objective
 
-    if best_feasible_state is not None:
-        selected_state = best_feasible_state
-        selected_objective = best_feasible_objective
-        selected_power_split = best_feasible_power_split
-        selected_diagnostics = best_feasible_diagnostics
-        selected_is_feasible = True
-    else:
-        selected_state = best_state
-        selected_objective = best_objective
-        selected_power_split = best_power_split
-        selected_diagnostics = best_diagnostics
-        selected_is_feasible = False
-
-    C, T, theta, phi, pos, rate_u, rate_k = selected_state
     communication_rate = float(np.sum(rate_u))
     sensing_rate = float(np.sum(rate_k))
-    return dict(objective=selected_objective,
+    best_feasible_sum_rate = (
+        float(np.sum(best_feasible_state[5]))
+        if best_feasible_state is not None else None
+    )
+    return dict(objective=cur_objective,
                 joint_rate=communication_rate + sensing_rate,
                 sum_rate=communication_rate,
                 sensing_rate=sensing_rate,
                 rate_u=rate_u, rate_k=rate_k,
                 C=C, T=T, theta=theta, phi=phi,
                 pos_uav=pos,
-                comm_power_frac=selected_power_split,
-                is_feasible=selected_is_feasible,
-                constraint_diagnostics=selected_diagnostics,
+                comm_power_frac=float(bf_info["comm_power_frac"]),
+                is_feasible=bool(cur_feasible),
+                constraint_diagnostics=cur_diagnostics,
+                solver_identity=CALIBRATION_SOLVER_SCOPE,
+                selection="terminal_iterate",
+                trajectory_mode=(
+                    "fixed_geometry" if fix_uav
+                    else "one_step_geometry_sensitivity"
+                ),
+                beam_direction_method="zf_and_matched_filter",
+                best_feasible_objective=(
+                    float(best_feasible_objective)
+                    if best_feasible_state is not None else None
+                ),
+                best_feasible_sum_rate=best_feasible_sum_rate,
                 history_objective=history_objective,
                 history_sum_rate=history_sum_rate,
                 history_sensing_rate=history_sensing_rate,

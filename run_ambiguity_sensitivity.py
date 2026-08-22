@@ -12,6 +12,8 @@ from ambiguity_hypotheses import (
     PRIMARY_DDPG_COMPARATOR_CSI_HYPOTHESIS_ID,
     PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
     PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+    PRIMARY_CSI_OBSERVATION_HYPOTHESIS_ID,
+    PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
     PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
 )
 from ambiguity_protocol import build_sensitivity_plan, build_sensitivity_report
@@ -28,7 +30,7 @@ def build_parser():
     )
     parser.add_argument("--episodes", type=int, default=1500)
     parser.add_argument("--eval-episodes", type=int, default=5)
-    parser.add_argument("--checkpoint-every", type=int, default=10)
+    parser.add_argument("--checkpoint-every", type=int, default=1)
     parser.add_argument("--primary-baseline")
     parser.add_argument("--primary-validation")
     parser.add_argument("--fresh", action="store_true")
@@ -69,6 +71,9 @@ def _require_compatible_primary(primary, profile_digest,
             PRIMARY_LOS_PROBABILITY_HYPOTHESIS_ID,
         "channel_coherence_hypothesis_id":
             PRIMARY_CHANNEL_COHERENCE_HYPOTHESIS_ID,
+        "csi_observation_hypothesis_id":
+            PRIMARY_CSI_OBSERVATION_HYPOTHESIS_ID,
+        "rate_model_hypothesis_id": PRIMARY_RATE_MODEL_HYPOTHESIS_ID,
         "cross_function_interference_hypothesis_id":
             PRIMARY_CROSS_FUNCTION_INTERFERENCE_HYPOTHESIS_ID,
     }
@@ -84,11 +89,74 @@ def _require_compatible_primary(primary, profile_digest,
     return True
 
 
+def _load_cached_sensitivity_summary(
+        summary_path, scenario, *, profile_digest, current_source_digest,
+        seeds, episodes, evaluation_episodes,
+):
+    """Accept a cached scenario only when its complete run remains authoritative."""
+    summary_path = Path(summary_path).resolve()
+    try:
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("Invalid cached sensitivity summary") from error
+    hypotheses = scenario["hypotheses"]
+    expected = {
+        "kind": "generated_result",
+        "protocol": "paper_baseline",
+        "profile_digest": str(profile_digest),
+        "source_tree_digest": str(current_source_digest),
+        "seeds": list(seeds),
+        "episodes": int(episodes),
+        "evaluation_episodes": int(evaluation_episodes),
+        "noise_hypothesis_id": hypotheses["noise"],
+        "dtl_transfer_mode": hypotheses["transfer_update"],
+        "dtl_transfer_schedule_id": hypotheses["transfer_schedule"],
+        "wfb_hypothesis_id": hypotheses["wfb"],
+        "ddpg_comparator_csi_hypothesis_id": hypotheses[
+            "ddpg_comparator_csi"
+        ],
+        "los_probability_hypothesis_id": hypotheses["los_probability"],
+        "channel_coherence_hypothesis_id": hypotheses["channel_coherence"],
+        "csi_observation_hypothesis_id": hypotheses["csi_observation"],
+        "rate_model_hypothesis_id": hypotheses["rate_model"],
+        "cross_function_interference_hypothesis_id": hypotheses[
+            "cross_function_interference"
+        ],
+    }
+    mismatches = [
+        field for field, value in expected.items()
+        if summary.get(field) != value
+    ]
+    if mismatches:
+        raise ValueError(
+            "Invalid cached sensitivity identity: " + ", ".join(mismatches)
+        )
+    from validate_results import validate_baseline_integrity
+
+    integrity = validate_baseline_integrity(
+        summary, result_directory=summary_path.parent
+    )
+    if not integrity["overall_pass"]:
+        failed = [
+            name for name, check in integrity["checks"].items()
+            if not check["pass"]
+        ]
+        raise ValueError(
+            "Invalid cached sensitivity evidence: " + ", ".join(failed)
+        )
+    return summary
+
+
 def run(args):
     from experiment_protocol import atomic_write_json, parse_seeds
     from run_baseline import build_parser as baseline_parser, run as run_baseline
 
     seeds = parse_seeds(args.seeds)
+    from parameter_profiles import load_calibrated_profile
+    from source_integrity import source_tree_digest
+
+    profile = load_calibrated_profile(args.profile)
+    current_source_digest = source_tree_digest()
     if bool(args.primary_baseline) != bool(args.primary_validation):
         raise ValueError(
             "--primary-baseline and --primary-validation must be supplied together"
@@ -104,13 +172,14 @@ def run(args):
         )
         validation = json.loads(validation_path.read_text(encoding="utf-8"))
         require_accepted_baseline(validation, external_primary)
-        from parameter_profiles import load_calibrated_profile
-        from source_integrity import source_tree_digest
-        profile = load_calibrated_profile(args.profile)
+        from validate_results import require_canonical_baseline_validation
+        require_canonical_baseline_validation(
+            external_primary, validation, baseline_path.parent
+        )
         _require_compatible_primary(
             external_primary,
             profile_digest=profile.digest,
-            current_source_digest=source_tree_digest(),
+            current_source_digest=current_source_digest,
             seeds=seeds,
             episodes=args.episodes,
             evaluation_episodes=args.eval_episodes,
@@ -126,6 +195,8 @@ def run(args):
     execution_plan = {
         **plan,
         "profile": str(Path(args.profile).resolve()),
+        "profile_digest": profile.digest,
+        "source_tree_digest": current_source_digest,
         "seeds": list(seeds),
         "episodes": int(args.episodes),
         "evaluation_episodes": int(args.eval_episodes),
@@ -147,8 +218,14 @@ def run(args):
         scenario_dir = output_root / scenario["id"]
         summary_path = scenario_dir / "baseline_summary.json"
         if summary_path.is_file() and not args.dry_run:
-            summaries[scenario["id"]] = json.loads(
-                summary_path.read_text(encoding="utf-8")
+            summaries[scenario["id"]] = _load_cached_sensitivity_summary(
+                summary_path,
+                scenario,
+                profile_digest=profile.digest,
+                current_source_digest=current_source_digest,
+                seeds=seeds,
+                episodes=args.episodes,
+                evaluation_episodes=args.eval_episodes,
             )
             continue
         hypotheses = scenario["hypotheses"]
@@ -168,6 +245,9 @@ def run(args):
             "--los-probability-hypothesis", hypotheses["los_probability"],
             "--channel-coherence-hypothesis",
             hypotheses["channel_coherence"],
+            "--csi-observation-hypothesis",
+            hypotheses["csi_observation"],
+            "--rate-model-hypothesis", hypotheses["rate_model"],
             "--cross-function-interference-hypothesis",
             hypotheses["cross_function_interference"],
             *(["--fresh"] if args.fresh else []),
@@ -175,8 +255,14 @@ def run(args):
         ])
         run_baseline(baseline_args)
         if not args.dry_run:
-            summaries[scenario["id"]] = json.loads(
-                summary_path.read_text(encoding="utf-8")
+            summaries[scenario["id"]] = _load_cached_sensitivity_summary(
+                summary_path,
+                scenario,
+                profile_digest=profile.digest,
+                current_source_digest=current_source_digest,
+                seeds=seeds,
+                episodes=args.episodes,
+                evaluation_episodes=args.eval_episodes,
             )
 
     if not args.dry_run:

@@ -5,21 +5,21 @@
 | Paper item | Code | Status and interpretation |
 |---|---|---|
 | Eqs. (1)-(2), UAV closure and step | `paper_contract.project_uav_step`, `environment._controls_from_action`, `environment._trajectory_diagnostics` | Every candidate is checked for bounds, step length, remaining return reachability, and exact final-slot closure. Feasibility fallback keeps the already projected UAV position, so a signal-control fallback cannot undo closure. |
-| Eqs. (3)-(9), path loss and Rician channels | `channel_model.py` | Seeded BS-HRIS, HRIS-ground, and direct channels with ULA/UPA responses. Eq. (5) maps `zeta_e=zeta_los-zeta_nlos`, `zeta_0=zeta_nlos`. Printed Eq. (6) symbol roles are primary and the standard Al-Hourani mapping is sensitivity. Eq. (8) Doppler uses target radial velocity and is applied only to the moving-target LoS term. Omitted constants are profile assumptions. |
+| Eqs. (3)-(9), path loss and Rician channels | `channel_model.py` | Seeded BS-HRIS, HRIS-ground, and direct channels with ULA/UPA responses. The primary implements Eq. (9)'s `La=Lax*Lay` active rectangular response and adjacent disjoint active/passive rectangular subarrays on one aperture. Uniform interleaving is a named sensitivity. Eq. (5) maps `zeta_e=zeta_los-zeta_nlos`, `zeta_0=zeta_nlos`. The unnumbered printed LoS-formula symbol roles are primary and the standard Al-Hourani mapping is sensitivity. Eq. (8)'s propagation-distance phase and additional Doppler exponential are both retained literally on moving-target LoS channels; this is not presented as a unique kinematic derivation. Omitted constants are profile assumptions. |
 | Eqs. (10)-(11), composite channels | `ChannelSet.composite_ue`, `ChannelSet.composite_te` | Passive path serves communication users and active path serves sensing targets, plus direct links. |
-| Eqs. (12)-(15), SINR/rates | `sinr_rate.compute_rates` | Per-user and per-target rates. The printed cross-function channels are reproduction-primary; receiver-consistent channels are a predeclared sensitivity. Eq. (12)'s target-indexed active-noise channel in a UE denominator is represented by the mean target-channel active-noise power because the paper gives no UE-target index mapping. |
+| Eqs. (12)-(15), SINR/rates | `sinr_rate.compute_rates` | Scalar pCSI per-user and per-target rates. They are used at zero SCEE only by the literal paper-section-split sensitivity. The printed cross-function channels are reproduction-primary; receiver-consistent channels are a predeclared sensitivity. Eq. (12)'s target-indexed active-noise channel in a UE denominator is represented by the mean target-channel active-noise power because the paper gives no UE-target index mapping. |
 | Eq. (16), baseline objective | `ObjectiveSpec.paper`, `evaluate_objective` | Exactly `sum_u R_u`; sensing remains a hard rate constraint. |
-| Eqs. (16a)-(16b), phase/amplification | `environment._controls_from_action`, `_find_feasible_controls` | Unit passive phases, bounded active phases and amplitudes. Infeasible proposals use a deterministic descending path scan plus refinement; no monotone-feasibility assumption is made. If both endpoints fail, bounded zero/half/full-gain phase templates are tested on the same channel. Replay receives the policy proposal; deterministic projection is part of the environment transition and the executed control remains diagnostic evidence. |
-| Eq. (16c), passive cascade | `paper_contract.cascade_power_16c` | Checked as the squared Frobenius norm of the coherent passive-element sum, including cross-element terms. |
-| Eqs. (16d), (18), active power | `sinr_rate.active_tx_power` | Aggregate active power checked separately. Beam columns already contain square-root watts, so BS power is not multiplied twice. |
+| Eqs. (16a)-(16b), phase/amplification | `environment._controls_from_action`, `_find_feasible_controls` | Unit passive phases, bounded active phases and amplitudes. Infeasible proposals use a deterministic descending path scan plus refinement; no monotone-feasibility assumption is made. If both endpoints fail, bounded zero/half/full-gain phase templates are tested on the same channel. Replay receives the executed physical action that produced the reward; the proposal and projection path remain diagnostic evidence. |
+| Eq. (16c), passive cascade | `paper_contract.cascade_power_16c` | Checked as the sum of the squared Frobenius norm of each passive-element cascade. The paper omits the user index, so the implementation enforces the printed expression for the worst communication user. |
+| Eqs. (16d), (18), active power | `sinr_rate.active_tx_power` | Aggregate active power checked separately. Beam columns already contain square-root watts, so BS power is not multiplied twice. Because waveform scope is ambiguous, the primary explicitly includes communication and sensing precoders plus amplifier noise once. |
 | Eq. (16e), target rate | `ObjectiveSpec.target_rate_min`, beam allocation | Per-target floor. The paper omits its numeric value. |
 | Eq. (16f), total BS power | `beamformers_from_powers` | Per-stream nonnegative powers sum to at most `P_T`. |
-| Eq. (17), Capon | `sinr_rate.capon_beamformer` | Deterministic covariance assumption because paper snapshots are unavailable. |
+| Eq. (17), Capon | `sinr_rate.capon_beamformer` | Expected-covariance MVDR proxy because finite snapshots and the exact sample covariance are unavailable; it is not claimed as exact author code. |
 | Eq. (19), coherence rate | `sinr_rate.coherence_corrected_rate` | Validated utility with the corrected overhead guard. It is not applied to paper curves because the paper omits the required coherence interval. |
-| Eqs. (20)-(25), SCEE | `ChannelSet`, `_compute_scee_rates` | Estimated channels plus effective error covariance and matrix log-determinant rates. The matrix model is used at both zero and positive estimation error so no formula-switch discontinuity occurs. |
+| Eqs. (20)-(25), SCEE | `ChannelSet`, `_compute_scee_rates` | Estimated channels plus effective error covariance and matrix log-determinant rates. The primary uses this receiver functional at zero and positive estimation error so no formula-switch discontinuity occurs. The paper's unreconciled scalar-pCSI/matrix-iCSI section split is retained as a labeled sensitivity. |
 | Eqs. (26)-(29), DDPG | `ddpg_agent.DDPGAgent` | Replay, Bellman critic update, deterministic actor update, and soft targets using `self.tau`. |
-| Eq. (30), transfer value | `dtl_agent.DTLAgent` | Primary: current source Q blended with the Eq. (26) target Bellman value. Sensitivity: source/target next-state continuation blend. Terminal transitions use raw reward and never reintroduce bootstrap value. |
-| Algorithms 2-3, AO | `ao_optimizer.py` | Disclosed numerical SciPy surrogate because the author CVX implementation and executable auxiliary details are unavailable. It uses beam direction/power allocation, direct phase optimization, and a one-step trajectory block; it is not the full MMSE/CVX/SCA algorithm. Published convergence histories are raw iterates; best-feasible tracking affects only the returned final solution. |
+| Eq. (30), transfer value | `dtl_agent.DTLAgent` | Primary: preserve the complete immediate reward and blend source/target next-state continuation values inside the Bellman target. Literal current-state Q blending and current-source/Bellman blending are labeled sensitivities because the paper does not publish a complete executable reward-bearing integration. Cross-dimensional transfer uses the declared common state prefix and requires identical action semantics. |
+| Algorithms 2-3, AO | `ao_optimizer.py` | Disclosed fixed-geometry SciPy surrogate because the author CVX implementation and executable auxiliary details are unavailable. It constructs ZF/matched-filter directions, optimizes stream powers and HRIS controls, and reports the terminal iterate. It is not the full MMSE/CVX/full-trajectory SCA algorithm; best-feasible tracking is diagnostic only. |
 | Fig. 4 reward | `simulation.train_ddpg`, `train_dtl`, `plot_baseline.py` | Raw communication rate only. No penalty plot is produced. Endpoints use the final 100 training episodes; full-curve acceptance independently recomputes a fixed 20-episode causal average at all 15 digitized paper markers. |
 
 ## Objective separation
@@ -36,7 +36,12 @@ The supplied source already implemented sensing rates and fixed weight sweeps.
 The research contribution is `ba_pcdtl_v1` in `pareto_agent.py`: a frozen
 accepted actor, preference-conditioned residual policy, vector twin-critic
 ensemble, training-only anchors, and validation-locked conservative fallback.
-The exact PNG point always uses the unnormalized physical `Q_c + Q_s` value.
+Discounted critic returns are mapped to finite-horizon rate-equivalent units.
+At the exact PNG point, their physical `Q_c + Q_s` sum is divided only by a
+frozen positive joint span, which leaves its action argmax unchanged and keeps
+actor utilities dimensionless. Non-balanced preferences use frozen-anchor
+normalization and augmented Chebyshev scalarization. Hypervolume uses a
+training-locked reference below normalized physical zero.
 
 No mode silently adds a penalty to the reported reward. Constraint deficits are
 diagnostics. SciPy AO uses an internal numerical merit function for constrained
@@ -61,17 +66,28 @@ description simultaneously. Neither is presented as unpublished author fact.
 `ambiguity_hypotheses.py` defines closed registries for noise mapping,
 Equation 30 update, transfer schedule, DTL-WFB replacement, the undisclosed CSI
 condition of the standalone DDPG comparator, LoS symbol roles, small-scale
-channel coherence, and cross-function interference channels. Primary
+channel coherence, CSI-quality observation semantics, the zero-error rate
+functional, and cross-function interference channels. Primary
 branches minimize unsupported mechanics or follow the strongest semantic
 evidence. `run_ambiguity_sensitivity.py` executes one-factor alternatives by
-default and can execute the full 256-combination factorial.
+default and can execute the full 1536-combination factorial. The one-factor
+plan contains the accepted primary plus eleven isolated alternatives because
+the Equation 30 axis has two nonprimary readings.
 
-Printed Eq. (6) is primary because it also agrees with the paper's high-LoS
+The unnumbered printed LoS formula is primary because it also agrees with the paper's high-LoS
 text; the standard Al-Hourani role mapping is sensitivity. Algorithm 1's
 per-time-step channel sampling is primary, but the realization is exposed before
-its action is scored. Episode-block fading is sensitivity. Statistical-CSI
-states omit channel coefficients; instantaneous CSI adds them, and ParCSI uses a
-fixed mask.
+its action is scored. Motion defines the next geometry and channel/precoders are
+updated atomically. Episode-block fading is sensitivity. The primary exposes
+estimated primitive tensors (zero NMSE for pCSI), nonzero-NMSE estimates for
+iCSI, and a fixed mask for ParCSI. Statistical iCSI without coefficients is a
+report-all sensitivity.
+
+The paper introduces scalar pCSI Eqs. (12)-(15), then matrix SCEE Eqs.
+(21)/(25), but does not state which functional applies at zero estimation
+error. Continuous matrix SCEE is primary because it does not change receiver
+models at an infinitesimal NMSE. The literal scalar-pCSI/matrix-iCSI split is
+reported separately and is never selected from curve quality.
 
 The primary DDPG comparator uses pCSI, matching DTL-pCSI so an algorithmic
 comparison does not also change channel-estimation quality. The earlier iCSI
@@ -120,7 +136,8 @@ digest, so earlier artifacts cannot authorize changed code.
   construction of the partial-CSI observation mask;
 - the usable coherence interval needed to apply Eq. (19);
 - exact Capon sample covariance and AO/CVX implementation;
-- UE-region origin and target speed;
+- UE-region origin, target region, UAV initial horizontal position, and target speed;
+- direct-link fading law and complete-waveform reading of Eq. (18);
 - Table III's target-noise versus active-noise symbol mapping;
 - the numerical UE-rate floor in the separately supplied extension PNG.
 
@@ -171,11 +188,16 @@ remain descriptive, and Figure 12 remains hardware-dependent.
 `checkpointing.py` stores full mutable training state and RNG state with an
 identity containing profile, physical configuration, objective, dimensions,
 CSI mode, allocator, power convention, noise mapping, Equation 30 update,
-transfer schedule, WFB interpretation, LoS mapping, channel coherence, and
-cross-function interference interpretation. Atomic
-replacement preserves the previous file if a write is interrupted. Resume
+transfer schedule, WFB interpretation, LoS mapping, channel coherence, CSI
+observability, and cross-function interference interpretation. Every runner
+defaults to checkpointing each completed episode. The file is flushed before
+atomic replacement; supported POSIX hosts also flush the parent directory.
+Atomic replacement preserves the previous file if a write is interrupted. Resume
 begins at the next unfinished episode. Restore also validates episode boundary,
 array shapes, finite values, history lengths, and requested episode count.
+Completed-result validation independently opens each `.pt` file and requires
+its internal identity, completed count, and raw histories to equal the result
+row; matching file hashes and identity sidecars are necessary but insufficient.
 The run seed function enables deterministic PyTorch/cuDNN execution and records
 CUDA RNG state when CUDA is available.
 
@@ -186,6 +208,9 @@ construction, so method loop order cannot alter a run. Different architectures
 are not claimed to consume identical random draws. Source and
 target streams remain distinct, and checkpoint restore supersedes the initial
 seed with the exact saved RNG state.
+Evaluation uses a separate SHA-256-derived schedule: methods are paired within
+each research seed, scene blocks are globally unique across research seeds, and
+evaluation scenes are disjoint from environment/training seeds.
 
 ## Acceptance boundary
 
@@ -209,7 +234,14 @@ test scenes. Publication acceptance additionally requires the complete fair
 independent-policy grid and a strictly positive paired Pareto-hypervolume
 interval. Both levels require
 100% physical feasibility, every UE/target floor, immutable baseline/anchor/gate
-provenance, and untouched test scenes.
+provenance, untouched test scenes, and finite bounded raw action-projection,
+retained-action, deterministic-recovery, and allocation-fallback evidence.
+Post-projection feasibility is not treated as proof that the actor proposed a
+feasible action. The fixed attribution limits are `0.10` maximum projection,
+`0.01` maximum deterministic recovery, and `0.95` minimum retained action.
+The PNG normalization references are independently reconstructed from the
+accepted baseline's final 100 training episodes, and each configured evaluation
+episode must appear in nested raw evidence.
 
 The holdout summary and validation are hash-bound to their raw result payload,
 source tree, selected profile, reference data, and baseline evidence. Feasibility

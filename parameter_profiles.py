@@ -12,11 +12,13 @@ from config import cfg
 from paper_contract import (
     CALIBRATION_SOLVER_SCOPE,
     FIGURE_6_SYSTEM_CONFIGURATION,
+    ao_surrogate_contract,
 )
 from physical_hypotheses import get_power_hypothesis
 from ambiguity_hypotheses import (
     get_cross_function_interference_hypothesis,
     get_los_probability_hypothesis,
+    get_rate_model_hypothesis,
 )
 from parameter_evidence import (
     PARAMETER_EVIDENCE,
@@ -24,6 +26,7 @@ from parameter_evidence import (
     PROFILE_KEYS,
     SENSITIVITY_ONLY_KEYS,
 )
+from paper_reference import paper_reference_digest
 
 
 SCHEMA_VERSION = 1
@@ -113,6 +116,11 @@ def _validate_dependencies(values):
     if upsilon_min > upsilon_0:
         raise ValueError("upsilon_min cannot exceed upsilon_0")
 
+    noise_min = _merged(values, "noise_min")
+    noise_std = _merged(values, "noise_std")
+    if noise_min > noise_std:
+        raise ValueError("noise_min cannot exceed noise_std")
+
     if "P_a_max" in values and values["P_a_max"] < cfg.sigma2_qa:
         raise ValueError("P_a_max cannot be below the active-noise floor")
 
@@ -200,6 +208,39 @@ def _load_json_object(path, label):
     if not isinstance(payload, dict):
         raise ValueError(f"{label} must be a JSON object: {path}")
     return payload
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_sha256(value):
+    return isinstance(value, str) and len(value) == 64 and all(
+        character in "0123456789abcdef" for character in value
+    )
+
+
+def _resolve_locked_artifact(directory, value, label):
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Power-hypothesis lock has no {label} path")
+    directory = Path(directory).resolve()
+    relative = Path(value)
+    if relative.is_absolute():
+        raise ValueError(f"Power-hypothesis {label} must be relative")
+    path = (directory / relative).resolve()
+    try:
+        path.relative_to(directory)
+    except ValueError as error:
+        raise ValueError(
+            f"Power-hypothesis {label} escapes the calibration directory"
+        ) from error
+    if not path.is_file():
+        raise ValueError(f"Missing power-hypothesis {label}: {path}")
+    return path
 
 
 def _current_source_tree_digest():
@@ -362,6 +403,8 @@ def load_calibrated_profile(path):
         raise ValueError("Profile has no valid calibration noise hypothesis")
     los_probability_id = selection.get("los_probability_hypothesis_id")
     get_los_probability_hypothesis(los_probability_id)
+    rate_model_id = selection.get("rate_model_hypothesis_id")
+    get_rate_model_hypothesis(rate_model_id)
     cross_interference_id = selection.get(
         "cross_function_interference_hypothesis_id"
     )
@@ -388,6 +431,10 @@ def load_calibrated_profile(path):
         or any(character not in "0123456789abcdef" for character in reference_digest)
     ):
         raise ValueError("Profile has no valid paper-reference digest")
+    if reference_digest != paper_reference_digest(None):
+        raise ValueError(
+            "Profile is not bound to the canonical paper reference"
+        )
 
     lock_candidates = (
         profile_path.parent / "power_hypothesis_lock.json",
@@ -417,12 +464,76 @@ def load_calibrated_profile(path):
         raise ValueError("Power-hypothesis lock has the wrong calibration system")
     if lock.get("paper_reference_sha256") != reference_digest:
         raise ValueError("Power-hypothesis lock used a different paper reference")
+    expected_hypotheses = {
+        "calibration_noise_hypothesis_id": calibration_noise_id,
+        "los_probability_hypothesis_id": los_probability_id,
+        "rate_model_hypothesis_id": rate_model_id,
+        "cross_function_interference_hypothesis_id": cross_interference_id,
+    }
+    if lock.get("calibration_hypotheses") != expected_hypotheses:
+        raise ValueError("Power-hypothesis lock has different calibration hypotheses")
+    if lock.get("fixed_sensitivity_values") != dict(fixed_values):
+        raise ValueError("Power-hypothesis lock has different fixed sensitivities")
+    if lock.get("source_profile_digest") != selection.get("source_profile_digest"):
+        raise ValueError("Power-hypothesis lock has a different source profile")
+    calibration_budgets = lock.get("calibration_budgets")
+    if (
+        not isinstance(calibration_budgets, Mapping)
+        or any(
+            isinstance(calibration_budgets.get(field), bool)
+            or not isinstance(calibration_budgets.get(field), int)
+            or calibration_budgets[field] <= 0
+            for field in ("ao_iterations", "optimizer_max_iterations")
+        )
+    ):
+        raise ValueError("Power-hypothesis lock has invalid calibration budgets")
     selected_profile = lock.get("selected_profile")
     if not isinstance(selected_profile, str) or not selected_profile.strip():
         raise ValueError("Power-hypothesis lock has no selected profile")
     locked_profile_path = (lock_path.parent / selected_profile).resolve()
     if locked_profile_path != profile_path:
         raise ValueError("Power-hypothesis lock points to a different profile")
+    candidate_artifacts = lock.get("candidate_artifacts")
+    if (
+        not isinstance(candidate_artifacts, Mapping)
+        or set(candidate_artifacts) != {"paper_db_as_dbm", "paper_db_as_dbw"}
+    ):
+        raise ValueError("Power-hypothesis lock has incomplete candidate artifacts")
+    resolved_artifacts = {}
+    for candidate_id, artifact in candidate_artifacts.items():
+        if not isinstance(artifact, Mapping):
+            raise ValueError("Power-hypothesis candidate artifact must be an object")
+        report_artifact = _resolve_locked_artifact(
+            lock_path.parent,
+            artifact.get("calibration_report"),
+            f"{candidate_id} calibration report",
+        )
+        report_digest = artifact.get("calibration_report_sha256")
+        profile_artifact = artifact.get("calibrated_profile")
+        profile_digest = artifact.get("calibrated_profile_sha256")
+        if not _is_sha256(report_digest):
+            raise ValueError("Power-hypothesis candidate report has invalid hash")
+        if profile_artifact is None:
+            if profile_digest is not None:
+                raise ValueError("Power-hypothesis candidate profile hash is orphaned")
+            resolved_profile = None
+        else:
+            resolved_profile = _resolve_locked_artifact(
+                lock_path.parent,
+                profile_artifact,
+                f"{candidate_id} calibrated profile",
+            )
+            if not _is_sha256(profile_digest):
+                raise ValueError("Power-hypothesis candidate profile has invalid hash")
+        resolved_artifacts[candidate_id] = {
+            "report": report_artifact,
+            "report_sha256": report_digest,
+            "profile": resolved_profile,
+            "profile_sha256": profile_digest,
+        }
+    selected_artifacts = resolved_artifacts[hypothesis_id]
+    if selected_artifacts["profile"] != profile_path:
+        raise ValueError("Power-hypothesis selected artifact points elsewhere")
     candidate_scores = lock.get("candidate_scores")
     if (
         not isinstance(candidate_scores, list)
@@ -445,6 +556,8 @@ def load_calibrated_profile(path):
         "calibration report",
     )
     report = _load_json_object(report_path, "calibration report")
+    if selected_artifacts["report"] != report_path:
+        raise ValueError("Power-hypothesis selected report points elsewhere")
     _require_source_tree_binding(
         "Calibration report", report, current_source_digest
     )
@@ -457,6 +570,8 @@ def load_calibrated_profile(path):
         or report.get("calibration_system") != FIGURE_6_SYSTEM_CONFIGURATION
     ):
         raise ValueError("Calibration report has the wrong Figure 6 system")
+    if report.get("ao_surrogate_contract") != ao_surrogate_contract(cfg):
+        raise ValueError("Calibration report has the wrong AO surrogate contract")
     if report.get("power_hypothesis_id") != hypothesis_id:
         raise ValueError("Calibration report uses a different power hypothesis")
     if report.get("calibration_noise_hypothesis_id") != calibration_noise_id:
@@ -464,6 +579,10 @@ def load_calibrated_profile(path):
     if report.get("los_probability_hypothesis_id") != los_probability_id:
         raise ValueError(
             "Calibration report uses a different LoS probability hypothesis"
+        )
+    if report.get("rate_model_hypothesis_id") != rate_model_id:
+        raise ValueError(
+            "Calibration report uses a different rate-model hypothesis"
         )
     if report.get("cross_function_interference_hypothesis_id") != (
         cross_interference_id
@@ -494,10 +613,14 @@ def load_calibrated_profile(path):
         or len(set(seeds)) != len(seeds)
     ):
         raise ValueError("Calibration report has invalid common-random seeds")
+    if lock.get("common_random_seeds") != seeds:
+        raise ValueError("Power-hypothesis lock has different common-random seeds")
     for field in ("ao_iterations", "optimizer_max_iterations"):
         value = report.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"Calibration report has invalid {field}")
+        if calibration_budgets.get(field) != value:
+            raise ValueError("Power-hypothesis lock has different calibration budgets")
     prior_weight = report.get("prior_weight")
     if (
         isinstance(prior_weight, bool)
@@ -543,6 +666,22 @@ def load_calibrated_profile(path):
         for key, value in selected_values.items()
     ):
         raise ValueError("Calibration report selected candidate does not match")
+    if (
+        _sha256_file(report_path) != selected_artifacts["report_sha256"]
+        or _sha256_file(profile_path) != selected_artifacts["profile_sha256"]
+    ):
+        raise ValueError("Power-hypothesis artifact hash mismatch")
+    for candidate_id, artifacts in resolved_artifacts.items():
+        if candidate_id == hypothesis_id:
+            continue
+        if _sha256_file(artifacts["report"]) != artifacts["report_sha256"]:
+            raise ValueError("Power-hypothesis artifact hash mismatch")
+        if (
+            artifacts["profile"] is not None
+            and _sha256_file(artifacts["profile"])
+            != artifacts["profile_sha256"]
+        ):
+            raise ValueError("Power-hypothesis artifact hash mismatch")
     return profile
 
 
@@ -587,6 +726,11 @@ def _expanded_values(profile, cfg_obj=cfg):
     if los_probability_id is not None:
         values["los_probability_hypothesis_id"] = (
             get_los_probability_hypothesis(los_probability_id).identifier
+        )
+    rate_model_id = profile.selection.get("rate_model_hypothesis_id")
+    if rate_model_id is not None:
+        values["rate_model_hypothesis_id"] = (
+            get_rate_model_hypothesis(rate_model_id).identifier
         )
     cross_interference_id = profile.selection.get(
         "cross_function_interference_hypothesis_id"

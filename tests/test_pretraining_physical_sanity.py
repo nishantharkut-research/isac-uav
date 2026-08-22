@@ -36,10 +36,12 @@ def test_pretraining_sanity_accepts_feasible_action_sensitive_configuration():
     assert report["comm_action_response_median"] == pytest.approx(0.02)
 
 
-def test_pretraining_sanity_rejects_action_insensitive_configuration():
+def test_pretraining_sanity_reports_action_insensitivity_without_stopping():
     with patch(
         "parameter_identification.evaluate_candidate",
         return_value=_metrics(action_response=0.001),
     ):
-        with pytest.raises(RuntimeError, match="action"):
-            run_pretraining_physical_sanity(seeds=(1, 2, 3))
+        report = run_pretraining_physical_sanity(seeds=(1, 2, 3))
+    assert report["passed"] is False
+    assert report["advisory_only"] is True
+    assert report["reasons"]
