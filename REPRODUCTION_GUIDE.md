@@ -721,3 +721,10 @@ Call BA-PCDTL superior only if the relevant validator reports
 `overall_pass: true`. Until colleague-side full runs pass, this package is a
 verified implementation and experiment protocol, not numerical proof of
 reproduction or improvement.
+
+## 20. Delivery Integrity
+
+`DELIVERY_MANIFEST.json` hashes LF-normalized text content and raw binary
+content. This keeps source verification stable across Windows and Linux Git
+checkouts while PDFs, images, and other binary assets remain byte-exact. The
+ZIP builder writes those same canonical bytes into the source archive.

@@ -1,4 +1,23 @@
 {
+  "content_hash_contract": {
+    "algorithm": "sha256",
+    "binary_content": "raw_bytes",
+    "text_content": "crlf_and_cr_normalized_to_lf",
+    "text_file_names": [
+      ".gitattributes",
+      ".gitignore"
+    ],
+    "text_suffixes": [
+      ".csv",
+      ".json",
+      ".md",
+      ".py",
+      ".toml",
+      ".txt",
+      ".yaml",
+      ".yml"
+    ]
+  },
   "excluded": [
     ".git",
     ".mypy_cache",
@@ -15,8 +34,13 @@
     "runs",
     "superpowers"
   ],
-  "file_count_excluding_manifest": 131,
+  "file_count_excluding_manifest": 132,
   "files": [
+    {
+      "bytes": 249,
+      "path": ".gitattributes",
+      "sha256": "c7bbe67cdf01fcec9ffa04e46133aab72a6b54f002bdbd99056fbd24081b02ea"
+    },
     {
       "bytes": 200,
       "path": ".gitignore",
@@ -58,9 +82,9 @@
       "sha256": "09a6be5f567e14e644a99285492bf5592022e252d4c1753ef46e6cb5bd1feca8"
     },
     {
-      "bytes": 30474,
+      "bytes": 30800,
       "path": "REPRODUCTION_GUIDE.md",
-      "sha256": "46da261574f40f1aae5afbc1985de14b6e70ef4eb6da6ad25566481565a3765e"
+      "sha256": "9eca87aab478197b7eeea2ed2c1143e057ba352b2c5356b786da2b5615864e81"
     },
     {
       "bytes": 6995,
@@ -88,9 +112,9 @@
       "sha256": "b893bce8e59b8a0eeaaf083d0bbe0324721825df32e0093919a540b64e03ecb7"
     },
     {
-      "bytes": 3275,
+      "bytes": 3892,
       "path": "build_delivery.py",
-      "sha256": "89bb9b2263b99c745f14a76b070ecb193c00a7bc239f7524a42c62875ef9d45a"
+      "sha256": "1bf0d86d4d93151adce10d7b920dd1391be4f609734bc040c700ef568a0c9a47"
     },
     {
       "bytes": 31260,
@@ -403,9 +427,9 @@
       "sha256": "aff8b8e00ce40fb8ac6522e050e64c299bd55ebf53cc4d6f01c2171dd413501a"
     },
     {
-      "bytes": 79762,
+      "bytes": 79498,
       "path": "simulation.py",
-      "sha256": "1d8b2de0a1bbbf6491644d7f1a5e518fb18325032adf31c8a26d330aa5066f68"
+      "sha256": "e04b0809cef38c7311b04b4ef6f9f5bb2067d0a2331bc4fbcdd39f7c1fa3686d"
     },
     {
       "bytes": 25116,
@@ -488,9 +512,9 @@
       "sha256": "5c878c2540ed5cc0c2c6f59d2e14b093580dacdbf085d3352ee2fbf8d73024b8"
     },
     {
-      "bytes": 1952,
+      "bytes": 4626,
       "path": "tests/test_delivery_manifest.py",
-      "sha256": "95aea39a73511f71107ed1b02fcb6c7b53e23f2ab0221ec2f823c88b46790ec2"
+      "sha256": "3cca29398d588a90e33da1e89c3371bd2dfb56aadf99aa9f4e7aa37847c57fc5"
     },
     {
       "bytes": 6161,
@@ -677,5 +701,5 @@
   "kind": "source_only_research_handoff",
   "manifest_self_hash_included": false,
   "package": "isac-uav",
-  "schema_version": 1
+  "schema_version": 2
 }
